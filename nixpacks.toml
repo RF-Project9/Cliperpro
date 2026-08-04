@@ -2,7 +2,7 @@
 # Installs ffmpeg (kept for future real video cutting) and bun.
 
 [phases.setup]
-nixPkgs = ["ffmpeg", "bun"]
+nixPkgs = ["ffmpeg", "bun", "openssl"]
 
 [phases.install]
 cmds = ["bun install"]

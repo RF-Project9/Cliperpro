@@ -56,3 +56,27 @@ Stage Summary:
 - OpenAI viral detection is fully wired; the only failure in sandbox is OpenAI's regional restriction (HK region blocked) — works fine on Railway (US/EU) with user's real API key
 - Deployable to Railway via GitHub with persistent volume for SQLite
 - All 5 dev-server, lint, and browser-verification gates pass
+
+---
+Task ID: 8
+Agent: main
+Task: Initialize git and push ViralClip AI project to GitHub (RF-Project9/Cliperpro)
+
+Work Log:
+- Updated .gitignore: excluded db/*.db, agent-ctx/, worklog.md; added !.env.example exception
+- Removed db/custom.db and .env from git tracking (kept .env.example as template)
+- Verified NO real secrets committed (.env only had local DB path, README "sk-..." is doc example)
+- Committed cleanup (2 commits added on top of existing scaffold commits)
+- Added remote origin: git@github.com:RF-Project9/Cliperpro.git
+- Set branch to main
+- Attempted SSH push → failed: ssh binary not installed in sandbox
+- Attempted HTTPS push → failed: no GitHub credentials/token available
+- Installed gh CLI? → not available, no root access to install
+- Created git bundle (download/Cliperpro.git.bundle, 206K) with complete history — verified valid
+- Created source tarball (download/Cliperpro-source.tar.gz, 40M)
+
+Stage Summary:
+- Git repo FULLY PREPARED: 112 files, 4 commits, branch=main, remote=SSH URL set
+- Sandbox CANNOT push (no ssh binary, no GitHub token, no root access)
+- User must complete push from their own machine OR provide a GitHub PAT
+- Recommended path: download Cliperpro.git.bundle → clone locally → push to GitHub

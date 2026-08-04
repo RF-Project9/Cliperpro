@@ -12,7 +12,7 @@ COPY package.json bun.lock ./
 # Install dependencies (including devDependencies for build)
 RUN bun install --frozen-lockfile
 
-# Copy source
+# Copy source (respect .dockerignore)
 COPY . .
 
 # Generate Prisma client & build Next.js standalone
@@ -32,28 +32,24 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends openssl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy standalone Next.js build
+# Copy the entire standalone Next.js build (server.js + minimal node_modules traced by Next)
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 
-# Copy Prisma files (schema + generated client) so db:deploy works at runtime
+# Copy the FULL builder node_modules on top of the standalone one.
+# This guarantees every runtime dependency (pg, pg-pool, @prisma/adapter-pg,
+# postgres-*, split2, etc.) is present, regardless of whether Next.js's
+# standalone tracing detected them. Optional packages (pg-cloud) that may be
+# absent won't break the build — we copy the whole folder as-is.
+#
+# This is slightly larger but eliminates all "folder not found" COPY errors.
+COPY --from=builder /app/node_modules ./node_modules
+
+# Copy Prisma schema so `prisma db push` works at runtime
 COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
-COPY --from=builder /app/node_modules/@prisma/adapter-pg ./node_modules/@prisma/adapter-pg
-COPY --from=builder /app/node_modules/pg ./node_modules/pg
-COPY --from=builder /app/node_modules/pg-types ./node_modules/pg-types
-COPY --from=builder /app/node_modules/postgres-bytea ./node_modules/postgres-bytea
-COPY --from=builder /app/node_modules/postgres-array ./node_modules/postgres-array
-COPY --from=builder /app/node_modules/postgres-date ./node_modules/postgres-date
-COPY --from=builder /app/node_modules/postgres-interval ./node_modules/postgres-interval
-COPY --from=builder /app/node_modules/pg-protocol ./node_modules/pg-protocol
-COPY --from=builder /app/node_modules/pg-connection-string ./node_modules/pg-connection-string
-COPY --from=builder /app/node_modules/pg-pool ./node_modules/pg-pool
-COPY --from=builder /app/node_modules/pg-cloud ./node_modules/pg-cloud
-COPY --from=builder /app/node_modules/split2 ./node_modules/split2
+
+# Copy package.json (needed for `bun run` scripts: db:deploy / start:prod)
 COPY --from=builder /app/package.json ./package.json
 
 EXPOSE 3000

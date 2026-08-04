@@ -32,18 +32,16 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends openssl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy the entire standalone Next.js build (server.js + minimal node_modules traced by Next)
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
+# Copy standalone Next.js build.
+# IMPORTANT: preserve the .next/standalone/ path because package.json's
+# start:prod script runs `bun .next/standalone/server.js`.
+# The standalone output is self-contained: server.js + traced node_modules
+# + .next/static + public + package.json.
+COPY --from=builder /app/.next/standalone ./.next/standalone
 
-# Copy the FULL builder node_modules on top of the standalone one.
-# This guarantees every runtime dependency (pg, pg-pool, @prisma/adapter-pg,
-# postgres-*, split2, etc.) is present, regardless of whether Next.js's
-# standalone tracing detected them. Optional packages (pg-cloud) that may be
-# absent won't break the build — we copy the whole folder as-is.
-#
-# This is slightly larger but eliminates all "folder not found" COPY errors.
+# Copy the FULL builder node_modules so `bun run db:deploy` (prisma CLI) works.
+# Also serves as a fallback for any deps Next.js standalone tracing missed
+# (Node resolves from .next/standalone/node_modules/ up to /app/node_modules/).
 COPY --from=builder /app/node_modules ./node_modules
 
 # Copy Prisma schema so `prisma db push` works at runtime

@@ -8,6 +8,7 @@ import { detectViralClips } from "@/lib/clipper";
 import { serializeVideo, serializeVideoWithClips } from "@/lib/serialize";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 export const maxDuration = 300; // 5 minutes for the processing request
 
 export async function GET() {

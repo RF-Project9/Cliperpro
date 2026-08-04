@@ -22,7 +22,8 @@ function createPrismaClient(): PrismaClient {
     // Railway Postgres requires SSL; accept it. Local dev (no SSL) still works
     // because pg falls back to plain connection when ssl rejectUnauthorized fails.
     ssl:
-      databaseUrl.includes("railway.app") || databaseUrl.includes("up.railway.app")
+      databaseUrl.includes("railway.app") ||
+      databaseUrl.includes("up.railway.app")
         ? { rejectUnauthorized: false }
         : false,
     max: 5,
@@ -41,8 +42,31 @@ function createPrismaClient(): PrismaClient {
   });
 }
 
-export const db = globalForPrisma.prisma ?? createPrismaClient();
-
-// Cache on globalThis to avoid creating multiple PrismaClient instances
-// during hot-reload (dev) or serverless reuse (prod).
-globalForPrisma.prisma = db;
+/**
+ * Lazy-initialized Prisma client.
+ *
+ * We use a Proxy so that the PrismaClient is only created the first time a
+ * property is accessed (e.g. `db.video.findMany()`), NOT when the module is
+ * imported. This is critical for Next.js builds:
+ *
+ *   During `next build`, Next.js imports all route modules to "collect page
+ *   data". At that point DATABASE_URL is not available (it's a runtime-only
+ *   Railway variable). If we eagerly created the PrismaClient here, the import
+ *   would throw and the build would fail with:
+ *     "Error: Failed to collect page data for /api/..."
+ *
+ *   With lazy init, the module imports fine at build time (no client created),
+ *   and the client is only created at runtime when a request comes in and
+ *   DATABASE_URL is set.
+ */
+export const db = new Proxy({} as PrismaClient, {
+  get(_target, prop: string | symbol) {
+    if (!globalForPrisma.prisma) {
+      globalForPrisma.prisma = createPrismaClient();
+    }
+    const client = globalForPrisma.prisma;
+    const value = Reflect.get(client, prop);
+    // Bind methods so `this` stays correct when destructured/ called standalone.
+    return typeof value === "function" ? value.bind(client) : value;
+  },
+}) as PrismaClient;

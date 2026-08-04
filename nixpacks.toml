@@ -1,5 +1,5 @@
 # Nixpacks config for Railway
-# Installs ffmpeg so the video clipping pipeline can cut real clips in production.
+# Installs ffmpeg (kept for future real video cutting) and bun.
 
 [phases.setup]
 nixPkgs = ["ffmpeg", "bun"]
@@ -11,4 +11,4 @@ cmds = ["bun install"]
 cmds = ["bun run db:generate && bun run build"]
 
 [start]
-cmd = "bun run db:push && bun run start"
+cmd = "bun run db:deploy && bun run start:prod"

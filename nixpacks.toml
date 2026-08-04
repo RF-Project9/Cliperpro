@@ -1,8 +1,9 @@
 # Nixpacks config for Railway
-# Installs ffmpeg (kept for future real video cutting) and bun.
+# Uses bun only. No openssl/ffmpeg needed because Prisma runs via the
+# pure-JS @prisma/adapter-pg driver adapter (no native libssl dependency).
 
 [phases.setup]
-nixPkgs = ["ffmpeg", "bun", "openssl"]
+nixPkgs = ["bun"]
 
 [phases.install]
 cmds = ["bun install"]

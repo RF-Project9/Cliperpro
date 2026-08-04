@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -50,5 +51,16 @@ test
 prompt
 
 server.log
+
+# database (SQLite) — should never be committed
+db/*.db
+db/*.db-journal
+db/*.db-wal
+db/*.db-shm
+
+# agent context / internal
+agent-ctx/
+worklog.md
+
 # Skills directory
 /skills/

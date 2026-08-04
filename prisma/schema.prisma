@@ -1,0 +1,64 @@
+// Prisma schema for ViralClip AI - AI Video Clipper
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// A long-form video the user wants to clip
+model Video {
+  id         String   @id @default(cuid())
+  url        String   // original URL submitted by user
+  youtubeId  String   // extracted YouTube video id
+  title      String?
+  channel    String?
+  thumbnail  String?
+  duration   Float?   // total duration in seconds
+  transcript String?  // raw transcript text
+  status     String   @default("pending") // pending | processing | completed | failed
+  error      String?
+  clips      Clip[]
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([youtubeId])
+  @@index([createdAt])
+}
+
+// A single generated viral clip (30-60s segment)
+model Clip {
+  id          String   @id @default(cuid())
+  videoId     String
+  video       Video   @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  startTime   Float   // seconds
+  endTime     Float   // seconds
+  duration    Float   // seconds (30-60)
+  title       String  // catchy clip title
+  description String? 
+  reason      String? // why this moment is viral
+  score       Float   // virality score 0-100
+  hook        String? // suggested opening hook
+  hashtags    String? // JSON array as string
+  transcript  String? // clip-specific transcript
+  status      String  @default("generated") // generated | downloaded | failed
+  downloadUrl String?
+  createdAt   DateTime @default(now())
+
+  @@index([videoId])
+  @@index([score])
+}
+
+// App settings (single row, id = "default")
+model Setting {
+  id           String  @id @default("default")
+  openaiApiKey String? 
+  openaiModel  String  @default("gpt-4o-mini")
+  clipCount    Int     @default(5) // number of clips to generate
+  minDuration  Int     @default(30) // min clip duration seconds
+  maxDuration  Int     @default(60) // max clip duration seconds
+  updatedAt    DateTime @updatedAt
+}

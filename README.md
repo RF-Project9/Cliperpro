@@ -47,49 +47,48 @@ Open <http://localhost:3000>, paste a YouTube URL, and click **Generate Clips**.
 
 ## 🌐 Deploy to Railway (via GitHub)
 
-This project is pre-configured for Railway with `railway.json` and `nixpacks.toml`.
+This project is pre-configured for Railway with `railway.json` and `nixpacks.toml`. It uses **PostgreSQL** (Railway's recommended managed database — no volumes to manage).
 
 ### Step 1 — Push to GitHub
 
-```bash
-git init
-git add .
-git commit -m "Initial commit: ViralClip AI"
-git branch -M main
-git remote add origin https://github.com/<your-username>/viralclip-ai.git
-git push -u origin main
-```
+Your repo is already pushed to `RF-Project9/Cliperpro`. ✅
 
 ### Step 2 — Create a Railway project
 
-1. Go to <https://railway.app> → **New Project** → **Deploy from GitHub repo**
-2. Select your `viralclip-ai` repository
+1. Go to <https://railway.app> → **New Project**
+2. Choose **Deploy from GitHub repo** → select `RF-Project9/Cliperpro`
 3. Railway auto-detects Next.js and uses the included `nixpacks.toml`
 
-### Step 3 — Add a persistent volume (for the SQLite database)
+### Step 3 — Add a PostgreSQL database (one click)
 
-1. In your Railway service → **Settings** → **Volumes** → **Add Volume**
-2. Mount path: `/data`
-3. Set the environment variable:
-   ```
-   DATABASE_URL=file:/data/app.db
-   ```
+1. In your Railway project → **New → Database → PostgreSQL**
+2. Railway provisions it instantly and exposes connection variables
+   (it creates a service named `Postgres` with variables like `DATABASE_URL`,
+   `PGHOST`, `PGUSER`, etc.)
 
-### Step 4 — Set environment variables
+### Step 4 — Wire the database to your app
 
-In your Railway service → **Variables**, add:
-
-| Variable          | Required | Description                                          |
-| ----------------- | -------- | ---------------------------------------------------- |
-| `DATABASE_URL`    | ✅       | `file:/data/app.db` (points to the mounted volume)   |
-| `OPENAI_API_KEY`  | optional | Your OpenAI key (or set it in the app's Settings UI) |
-| `OPENAI_MODEL`    | optional | Default `gpt-4o-mini`                                |
-
-> The `startCommand` in `railway.json` runs `bun run db:push` automatically on every deploy, so the schema is always in sync.
+1. Open the **Cliperpro** service → **Variables** tab
+2. Add a new variable:
+   - **Name**: `DATABASE_URL`
+   - **Value**: click **"Reference Variable"** → pick `Postgres.DATABASE_URL`
+   - (Railway auto-fills something like `postgresql://...@...railway.app:.../railway`)
+3. Also add:
+   - `OPENAI_API_KEY` = your `sk-...` key
+   - `OPENAI_MODEL` = `gpt-4o-mini` (optional)
 
 ### Step 5 — Deploy
 
-Railway builds and deploys automatically on every push to `main`. Once deployed, open the generated `*.up.railway.app` URL.
+The `startCommand` in `railway.json` runs `bun run db:deploy && bun run start:prod`
+on every deploy. `db:deploy` (= `prisma db push --skip-generate`) creates all tables
+automatically on first boot — no manual migration needed.
+
+Railway deploys automatically on every push to `main`. Once deployed, open the
+generated `*.up.railway.app` URL.
+
+> **Why PostgreSQL instead of SQLite?** SQLite needs a persistent volume (tricky
+> to set up on Railway's current UI) and only supports one writer. PostgreSQL is
+> Railway-native, concurrent, and backed up automatically.
 
 ## 🔑 OpenAI API Key
 

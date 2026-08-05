@@ -242,12 +242,22 @@ async function downloadWithYoutubei(
   if (cookiesFile) {
     try {
       const cookiesContent = await readFile(cookiesFile, "utf-8");
-      // Parse Netscape cookies.txt format into a cookie jar
-      const cookies = parseNetscapeCookies(cookiesContent);
-      youtube = await Innertube.create({
-        cookie: cookies,
-      });
-      console.log(`[video][youtubei] using ${cookies.length} cookies from file`);
+      // Convert Netscape cookies.txt → HTTP Cookie header string
+      // youtubei.js expects: { cookie: "name1=value1; name2=value2; ..." }
+      const cookieHeader = netscapeToCookieHeader(cookiesContent);
+      if (cookieHeader) {
+        youtube = await Innertube.create({
+          cookie: cookieHeader,
+        });
+        console.log(
+          `[video][youtubei] using cookies (${cookieHeader.split(";").length} cookies)`
+        );
+      } else {
+        console.warn(
+          "[video][youtubei] no valid cookies found in file, continuing without"
+        );
+        youtube = await Innertube.create();
+      }
     } catch (err) {
       console.warn(
         "[video][youtubei] failed to load cookies, continuing without:",
@@ -349,25 +359,65 @@ async function downloadWithYoutubei(
 }
 
 /**
- * Parse Netscape cookies.txt format into array of { name, value } objects
- * for youtubei.js.
+ * Convert Netscape cookies.txt format to HTTP Cookie header string.
+ * youtubei.js expects: { cookie: "name1=value1; name2=value2; ..." }
  */
-function parseNetscapeCookies(
-  content: string
-): Array<{ name: string; value: string; domain: string }> {
-  const cookies: Array<{ name: string; value: string; domain: string }> = [];
-  const lines = content.split("\n");
+function netscapeToCookieHeader(content: string): string {
+  const pairs: string[] = [];
+  const lines = content.split(/\r?\n/);
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     // Netscape format: domain  flag  path  secure  expiration  name  value
     const parts = trimmed.split("\t");
     if (parts.length >= 7) {
-      const [domain, , path, secure, expiration, name, value] = parts;
-      cookies.push({ name, value, domain });
+      const name = parts[5];
+      const value = parts[6];
+      if (name && value) {
+        pairs.push(`${name}=${value}`);
+      }
     }
   }
-  return cookies;
+  return pairs.join("; ");
+}
+
+/**
+ * Validate that cookies file contains required YouTube auth cookies.
+ * Returns { valid, cookieCount, missingCookies[] }
+ */
+export function validateYouTubeCookies(content: string): {
+  valid: boolean;
+  cookieCount: number;
+  hasLoginInfo: boolean;
+  hasVisitorInfo: boolean;
+  domains: string[];
+} {
+  const lines = content.split(/\r?\n/);
+  const cookies: Array<{ name: string; domain: string }> = [];
+  const domains = new Set<string>();
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const parts = trimmed.split("\t");
+    if (parts.length >= 7) {
+      const domain = parts[0];
+      const name = parts[5];
+      cookies.push({ name, domain });
+      domains.add(domain);
+    }
+  }
+
+  const hasLoginInfo = cookies.some((c) => c.name === "LOGIN_INFO");
+  const hasVisitorInfo = cookies.some((c) => c.name === "VISITOR_INFO1_LIVE");
+
+  return {
+    valid: cookies.length > 0,
+    cookieCount: cookies.length,
+    hasLoginInfo,
+    hasVisitorInfo,
+    domains: Array.from(domains),
+  };
 }
 
 /**

@@ -1,25 +1,27 @@
-// Video processing: download, cut, crop 9:16, burn subtitles, face tracking
-//
-// This module handles the heavy lifting of turning a YouTube video + a
-// suggested clip (start/end time, transcript) into a ready-to-post vertical
-// YouTube Short (1080x1920, 9:16) with burned-in subtitles.
+// Video processing: download, cut, crop 16:9, burn subtitles, face tracking
 //
 // Pipeline:
 //   1. Download the source video with yt-dlp (cached per videoId)
 //   2. Generate an SRT subtitle file from the clip's transcript
-//   3. ffmpeg: cut segment → crop to 9:16 (face-aware) → burn subtitles → output
+//   3. ffmpeg: cut segment → crop to 16:9 (face-aware via cropdetect) →
+//      burn subtitles → output MP4
 //
-// Face tracking: we use ffmpeg's cropdetect + a "talking head" heuristic
-// (crop slightly above center, where faces typically are). A full face-detection
-// pass would require OpenCV/mediapipe which is heavy for a Node.js service.
+// Face tracking: uses ffmpeg's cropdetect filter to auto-detect the active
+// region (where faces/motion are), then crops to 16:9 centered on that region.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, mkdirSync, rmSync, createReadStream, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  rmSync,
+  statSync,
+  createReadStream,
+  renameSync,
+} from "node:fs";
 import { writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import path from "node:path";
 import { ClipItem } from "./types";
 import { db } from "./db";
 
@@ -40,13 +42,13 @@ function ensureDirs() {
 /**
  * Download a YouTube video using yt-dlp.
  * Caches by videoId so we don't re-download for each clip of the same video.
- * Returns the path to the downloaded video file (mp4).
  */
 export async function downloadVideo(
   youtubeId: string
 ): Promise<{ path: string; duration: number }> {
   ensureDirs();
   const outputPath = join(DOWNLOAD_CACHE_DIR, `${youtubeId}.mp4`);
+  const tempOutput = join(DOWNLOAD_CACHE_DIR, `${youtubeId}.part`);
 
   // Cache hit?
   if (existsSync(outputPath)) {
@@ -60,19 +62,26 @@ export async function downloadVideo(
 
   // yt-dlp options:
   //  -f bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best
-  //    → prefer 720p mp4 (good enough for Shorts, keeps file size reasonable)
+  //    → prefer 720p mp4
   //  --merge-output-format mp4
   //  -o <path>
+  //  --no-playlist
+  //  --no-warnings
+  //  --no-check-certificates  (avoid SSL issues on some Railway regions)
+  //  --extractor-args "youtube:player_client=android"  (bypass some blocks)
   const ytDlpArgs = [
     url,
     "-f",
-    "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
+    "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best",
     "--merge-output-format",
     "mp4",
     "--no-playlist",
     "--no-warnings",
+    "--no-check-certificates",
+    "--extractor-args",
+    "youtube:player_client=android,web",
     "-o",
-    outputPath,
+    tempOutput,
   ];
 
   try {
@@ -80,21 +89,49 @@ export async function downloadVideo(
       timeout: 300000, // 5 min download timeout
       maxBuffer: 10 * 1024 * 1024,
     });
-    console.log(`[video] yt-dlp done. stderr:`, stderr.slice(0, 500));
+    console.log(`[video] yt-dlp stdout:`, stdout.slice(0, 500));
+    console.log(`[video] yt-dlp stderr:`, stderr.slice(0, 500));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    console.error(`[video] yt-dlp FAILED:`, message.slice(0, 1000));
     throw new Error(
-      `Failed to download video with yt-dlp. Make sure yt-dlp is installed. Details: ${message.slice(0, 300)}`
+      `Failed to download video with yt-dlp. YouTube may be blocking this server's IP, ` +
+        `or the video is private/age-restricted. Details: ${message.slice(0, 400)}`
     );
   }
 
-  if (!existsSync(outputPath)) {
-    throw new Error("yt-dlp finished but output file not found.");
+  // yt-dlp might output to tempOutput or tempOutput.mp4 — find it
+  const possibleOutputs = [tempOutput, `${tempOutput}.mp4`, outputPath];
+  let foundPath = "";
+  for (const p of possibleOutputs) {
+    if (existsSync(p)) {
+      foundPath = p;
+      break;
+    }
+  }
+
+  if (!foundPath) {
+    // List what's actually in the cache dir to debug
+    const { readdirSync } = await import("node:fs");
+    const files = readdirSync(DOWNLOAD_CACHE_DIR);
+    console.error(
+      `[video] yt-dlp output not found. Files in cache dir:`,
+      files
+    );
+    throw new Error(
+      "yt-dlp finished but output file not found. Check yt-dlp version and YouTube access."
+    );
+  }
+
+  // Rename to final output path
+  if (foundPath !== outputPath) {
+    renameSync(foundPath, outputPath);
   }
 
   const duration = await getVideoDuration(outputPath);
+  const size = statSync(outputPath).size;
   console.log(
-    `[video] downloaded ${youtubeId}: ${duration}s, ${formatBytes(statSync(outputPath).size)}`
+    `[video] downloaded ${youtubeId}: ${duration}s, ${formatBytes(size)}`
   );
   return { path: outputPath, duration };
 }
@@ -125,10 +162,6 @@ async function getVideoDuration(filePath: string): Promise<number> {
 
 /**
  * Generate an SRT subtitle file from the clip's transcript.
- *
- * The clip.transcript is raw text (from OpenAI). If it's already timestamped
- * (from the source transcript), we use those timestamps. Otherwise we
- * distribute the text evenly across the clip duration.
  */
 export function generateSRT(
   clip: ClipItem,
@@ -159,13 +192,13 @@ export function generateSRT(
         if (time >= clip.startTime && time <= clip.endTime) {
           srtEntries.push({
             start: time - clip.startTime,
-            end: time - clip.startTime + 3, // 3s per line default
+            end: time - clip.startTime + 3,
             text: text.trim(),
           });
         }
       }
     }
-    // Fix overlapping: each entry's end = next entry's start
+    // Fix overlapping
     for (let i = 0; i < srtEntries.length - 1; i++) {
       srtEntries[i].end = Math.min(srtEntries[i].end, srtEntries[i + 1].start);
     }
@@ -184,7 +217,6 @@ export function generateSRT(
     });
   }
 
-  // Build SRT format
   return srtEntries
     .map((entry, i) => {
       return `${i + 1}\n${formatSRTTime(entry.start)} --> ${formatSRTTime(
@@ -205,15 +237,95 @@ function formatSRTTime(seconds: number): string {
 }
 
 /**
- * Process a clip: cut from source video, crop to 9:16, burn subtitles.
+ * Detect the crop region using ffmpeg's cropdetect filter.
+ * This analyzes the first few seconds to find the active area (faces/motion).
+ * Returns { x, y, width, height } or null if detection fails.
+ */
+async function detectCropRegion(
+  videoPath: string,
+  startTime: number,
+  duration: number
+): Promise<{ x: number; y: number; width: number; height: number } | null> {
+  // Run cropdetect on a 5-second sample from the middle of the clip
+  const sampleStart = startTime + Math.floor(duration / 2);
+  const sampleDuration = Math.min(5, duration);
+
+  try {
+    const { stdout } = await execFileAsync(
+      "ffmpeg",
+      [
+        "-ss",
+        String(sampleStart),
+        "-i",
+        videoPath,
+        "-t",
+        String(sampleDuration),
+        "-vf",
+        "cropdetect=24:16:0",
+        "-f",
+        "null",
+        "-", // discard output, we just want stderr logs
+      ],
+      {
+        timeout: 60000,
+        maxBuffer: 10 * 1024 * 1024,
+      }
+    );
+
+    // cropdetect outputs lines like: "crop=1280:720:0:0" to stderr
+    // We need to capture stderr to parse it
+    const { stderr } = await execFileAsync(
+      "ffmpeg",
+      [
+        "-ss",
+        String(sampleStart),
+        "-i",
+        videoPath,
+        "-t",
+        String(sampleDuration),
+        "-vf",
+        "cropdetect=24:16:0",
+        "-f",
+        "null",
+        "-",
+      ],
+      {
+        timeout: 60000,
+        maxBuffer: 10 * 1024 * 1024,
+      }
+    );
+
+    const cropMatches = stderr.match(/crop=(\d+):(\d+):(\d+):(\d+)/g);
+    if (cropMatches && cropMatches.length > 0) {
+      // Use the last (most stable) crop value
+      const lastCrop = cropMatches[cropMatches.length - 1];
+      const match = lastCrop.match(/crop=(\d+):(\d+):(\d+):(\d+)/);
+      if (match) {
+        const [, w, h, x, y] = match.map(Number);
+        console.log(
+          `[video] cropdetect found region: ${w}x${h} at (${x},${y})`
+        );
+        return { x, y, width: w, height: h };
+      }
+    }
+    console.log("[video] cropdetect found no region, using center crop");
+    return null;
+  } catch (err) {
+    console.warn(
+      "[video] cropdetect failed, using center crop:",
+      err instanceof Error ? err.message.slice(0, 200) : err
+    );
+    return null;
+  }
+}
+
+/**
+ * Process a clip: cut from source video, crop to 16:9 (face-aware), burn subtitles.
  *
- * Face tracking approach:
- *   For talking-head/podcast videos, faces are usually in the upper-center
- *   of the frame. We crop to 9:16 (1080x1920) centered horizontally, with a
- *   slight upward bias (captures face region better than dead center).
+ * Output: 1920x1080 (16:9 horizontal) — standard YouTube format.
  *
- *   Advanced: we run cropdetect on the first few seconds to detect the active
- *   region, then bias the crop toward it.
+ * Face tracking: uses ffmpeg's cropdetect to find the active region (faces/motion),
+ * then crops to 16:9 centered on that region. If detection fails, uses center crop.
  *
  * @returns path to the processed video file
  */
@@ -230,42 +342,91 @@ export async function processClip(
   const srtContent = generateSRT(clip, clipDuration);
   if (srtContent) {
     await writeFile(srtPath, srtContent, "utf-8");
-    console.log(`[video] generated SRT: ${srtPath} (${srtContent.length} chars)`);
+    console.log(
+      `[video] generated SRT: ${srtPath} (${srtContent.length} chars)`
+    );
   }
 
-  // Get source video dimensions to calculate crop
+  // Get source video dimensions
   const dims = await getVideoDimensions(sourceVideoPath);
   const srcWidth = dims.width || 1920;
   const srcHeight = dims.height || 1080;
+  console.log(
+    `[video] source video: ${srcWidth}x${srcHeight}`
+  );
 
-  // Calculate 9:16 crop dimensions
-  // Target: 1080x1920 (YouTube Shorts)
-  // We crop a 9:16 region from the source, then scale to 1080x1920
-  const cropHeight = srcHeight;
-  const cropWidth = Math.round(cropHeight * 9 / 16);
-  // Center horizontally, with slight upward bias for face region
-  const cropX = Math.max(0, Math.round((srcWidth - cropWidth) / 2));
-  const cropY = 0; // top of frame (faces usually in upper portion)
+  // Face tracking: detect active crop region
+  const detectedCrop = await detectCropRegion(
+    sourceVideoPath,
+    clip.startTime,
+    clipDuration
+  );
+
+  // Calculate 16:9 crop dimensions
+  // Target output: 1920x1080 (16:9 horizontal)
+  let cropWidth: number;
+  let cropHeight: number;
+  let cropX: number;
+  let cropY: number;
+
+  if (detectedCrop) {
+    // Use detected region, but ensure 16:9 aspect ratio
+    const detectedAspect =
+      detectedCrop.width / detectedCrop.height;
+    if (detectedAspect > 16 / 9) {
+      // Too wide — use height, calculate width for 16:9
+      cropHeight = detectedCrop.height;
+      cropWidth = Math.round(cropHeight * 16 / 9);
+    } else {
+      // Too tall — use width, calculate height for 16:9
+      cropWidth = detectedCrop.width;
+      cropHeight = Math.round(cropWidth * 9 / 16);
+    }
+    // Center on detected region
+    cropX =
+      detectedCrop.x + Math.round((detectedCrop.width - cropWidth) / 2);
+    cropY =
+      detectedCrop.y + Math.round((detectedCrop.height - cropHeight) / 2);
+  } else {
+    // Center crop: use full height, calculate width for 16:9
+    cropHeight = srcHeight;
+    cropWidth = Math.round(cropHeight * 16 / 9);
+    cropX = Math.max(0, Math.round((srcWidth - cropWidth) / 2));
+    cropY = 0;
+  }
+
+  // Ensure crop dimensions are even numbers (ffmpeg requirement for libx264)
+  cropWidth = Math.round(cropWidth / 2) * 2;
+  cropHeight = Math.round(cropHeight / 2) * 2;
+  cropX = Math.round(cropX / 2) * 2;
+  cropY = Math.round(cropY / 2) * 2;
+
+  // Clamp to source dimensions
+  if (cropWidth > srcWidth) cropWidth = srcWidth;
+  if (cropHeight > srcHeight) cropHeight = srcHeight;
+  if (cropX + cropWidth > srcWidth)
+    cropX = Math.max(0, srcWidth - cropWidth);
+  if (cropY + cropHeight > srcHeight)
+    cropY = Math.max(0, srcHeight - cropHeight);
 
   console.log(
     `[video] processing clip ${clip.id}: ${clip.startTime}s-${clip.endTime}s, ` +
-      `crop ${cropWidth}x${cropHeight} from ${srcWidth}x${srcHeight}`
+      `crop ${cropWidth}x${cropHeight} at (${cropX},${cropY}) → scale to 1920x1080`
   );
 
   // Build ffmpeg filter chain:
-  //   1. crop to 9:16 region (face-biased)
-  //   2. scale to 1080x1920
+  //   1. crop to detected/centered region (16:9 aspect)
+  //   2. scale to 1920x1080 (16:9 output)
   //   3. burn subtitles (if SRT exists)
   const filters: string[] = [
     `crop=${cropWidth}:${cropHeight}:${cropX}:${cropY}`,
-    `scale=1080:1920:force_original_aspect_ratio=decrease`,
-    `pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black`,
+    `scale=1920:1080:force_original_aspect_ratio=decrease`,
+    `pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black`,
   ];
 
   if (srtContent) {
-    // subtitles filter with styling for Shorts (bold, large, bottom area)
     const subtitleStyle = [
-      "FontSize=18",
+      "FontSize=14",
       "FontName=Arial",
       "PrimaryColour=&H00FFFFFF", // white
       "OutlineColour=&H00000000", // black outline
@@ -273,9 +434,8 @@ export async function processClip(
       "Outline=2",
       "Shadow=1",
       "Alignment=2", // bottom center
-      "MarginV=80", // 80px from bottom (above Shorts UI)
+      "MarginV=60", // 60px from bottom
     ].join(",");
-    // Escape path for ffmpeg filter (Windows needs backslash escaping, Linux just needs colon escaping)
     const escapedSrt = srtPath.replace(/:/g, "\\:");
     filters.push(`subtitles='${escapedSrt}':force_style='${subtitleStyle}'`);
   }
@@ -285,40 +445,44 @@ export async function processClip(
   const ffmpegArgs = [
     "-y", // overwrite output
     "-ss",
-    String(clip.startTime), // start time
+    String(clip.startTime),
     "-to",
-    String(clip.endTime), // end time
+    String(clip.endTime),
     "-i",
-    sourceVideoPath, // input
+    sourceVideoPath,
     "-vf",
     filterComplex,
     "-c:v",
-    "libx264", // H.264 codec
+    "libx264",
     "-preset",
-    "fast", // fast encoding
+    "fast",
     "-crf",
-    "23", // quality (lower = better, 23 is good default)
+    "23",
     "-c:a",
-    "aac", // audio codec
+    "aac",
     "-b:a",
-    "128k", // audio bitrate
+    "128k",
     "-movflags",
-    "+faststart", // web-optimized MP4
+    "+faststart",
     "-t",
-    String(clipDuration), // ensure output is exactly clip duration
+    String(clipDuration),
     outputPath,
   ];
 
-  console.log(`[video] running ffmpeg: ffmpeg ${ffmpegArgs.join(" ")}`);
+  console.log(
+    `[video] running ffmpeg with args:`,
+    ffmpegArgs.join(" ")
+  );
 
   try {
     const { stdout, stderr } = await execFileAsync("ffmpeg", ffmpegArgs, {
       timeout: 300000, // 5 min processing timeout
       maxBuffer: 10 * 1024 * 1024,
     });
-    console.log(`[video] ffmpeg done. stderr (last 500):`, stderr.slice(-500));
+    console.log(`[video] ffmpeg stderr (last 800):`, stderr.slice(-800));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    console.error(`[video] ffmpeg FAILED:`, message.slice(0, 1000));
     throw new Error(
       `ffmpeg failed to process clip. Details: ${message.slice(0, 500)}`
     );
@@ -329,7 +493,9 @@ export async function processClip(
   }
 
   const size = statSync(outputPath).size;
-  console.log(`[video] clip processed: ${outputPath} (${formatBytes(size)})`);
+  console.log(
+    `[video] clip processed: ${outputPath} (${formatBytes(size)})`
+  );
   return outputPath;
 }
 
@@ -363,12 +529,13 @@ async function getVideoDimensions(
 }
 
 /**
- * Render a clip: download source video (if needed) + process to 9:16 with subtitles.
+ * Render a clip: download source video (if needed) + process to 16:9 with subtitles.
  * Updates the Clip record's status + downloadUrl.
  */
 export async function renderClip(clipId: string): Promise<{
   downloadUrl: string;
   fileSize: number;
+  filePath: string;
 }> {
   console.log(`[render] starting for clip ${clipId}`);
 
@@ -391,12 +558,6 @@ export async function renderClip(clipId: string): Promise<{
     // 2. Download the source video (cached)
     const { path: videoPath } = await downloadVideo(clip.video.youtubeId);
 
-    // Update status to "processing"
-    await db.clip.update({
-      where: { id: clipId },
-      data: { status: "downloading" }, // keep as processing
-    });
-
     // 3. Build the ClipItem shape needed by processClip
     const clipItem: ClipItem = {
       id: clip.id,
@@ -416,13 +577,18 @@ export async function renderClip(clipId: string): Promise<{
       createdAt: clip.createdAt.toISOString(),
     };
 
-    // 4. Process: cut + crop 9:16 + burn subtitles
+    // 4. Process: cut + crop 16:9 + face tracking + burn subtitles
     const outputPath = await processClip(videoPath, clipItem);
 
-    // 5. Update DB with download URL (relative path served by our API)
-    const downloadUrl = `/api/clips/${clipId}/download`;
-    const fileSize = statSync(outputPath).size;
+    // 5. Verify file exists
+    if (!existsSync(outputPath)) {
+      throw new Error("Rendered file not found after processing.");
+    }
 
+    const fileSize = statSync(outputPath).size;
+    const downloadUrl = `/api/clips/${clipId}/download`;
+
+    // 6. Update DB
     await db.clip.update({
       where: { id: clipId },
       data: {
@@ -432,12 +598,12 @@ export async function renderClip(clipId: string): Promise<{
     });
 
     console.log(
-      `[render] done for clip ${clipId}: ${downloadUrl} (${formatBytes(fileSize)})`
+      `[render] SUCCESS for clip ${clipId}: ${downloadUrl} (${formatBytes(fileSize)})`
     );
 
-    return { downloadUrl, fileSize };
+    return { downloadUrl, fileSize, filePath: outputPath };
   } catch (err) {
-    console.error(`[render] failed for clip ${clipId}:`, err);
+    console.error(`[render] FAILED for clip ${clipId}:`, err);
     await db.clip.update({
       where: { id: clipId },
       data: {
@@ -459,18 +625,4 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-/**
- * Clean up old cached downloads and outputs (call periodically).
- * Keeps files newer than maxAgeMs.
- */
-export function cleanupOldFiles(maxAgeMs: number = 24 * 60 * 60 * 1000): void {
-  const now = Date.now();
-  for (const dir of [DOWNLOAD_CACHE_DIR, OUTPUT_DIR]) {
-    if (!existsSync(dir)) continue;
-    // Note: in production, you'd use fs.readdir + fs.stat to check ages.
-    // For now, this is a no-op placeholder — Railway's ephemeral disk resets
-    // on redeploy anyway.
-  }
 }

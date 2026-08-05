@@ -10,6 +10,7 @@ import {
   Download,
   Loader2,
   Film,
+  AlertCircle,
 } from "lucide-react";
 import { useState } from "react";
 import Image from "next/image";
@@ -20,17 +21,20 @@ import { toast } from "sonner";
 import { ClipItem, VideoItem } from "@/lib/types";
 import { formatDuration, formatTimestamp } from "@/lib/youtube";
 import { useClipperStore } from "@/lib/store";
-import { renderClip, getDownloadUrl } from "@/lib/api";
 
 interface Props {
   clip: ClipItem;
   video: VideoItem;
 }
 
+type RenderState = "idle" | "rendering" | "ready" | "failed";
+
 export function ClipCard({ clip, video }: Props) {
   const [copied, setCopied] = useState<"title" | "tags" | null>(null);
-  const [isRendering, setIsRendering] = useState(false);
-  const [clipStatus, setClipStatus] = useState<ClipItem["status"]>(clip.status);
+  const [renderState, setRenderState] = useState<RenderState>(
+    clip.status === "downloaded" ? "ready" : "idle"
+  );
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const selectVideo = useClipperStore((s) => s.selectVideo);
 
   const thumb = video.thumbnail;
@@ -63,24 +67,65 @@ export function ClipCard({ clip, video }: Props) {
     selectVideo(video, [clip]);
   }
 
-  async function handleRender() {
-    setIsRendering(true);
-    setClipStatus("downloading");
-    toast.info("Rendering clip... downloading video & processing with ffmpeg");
+  async function handleRenderAndDownload() {
+    setRenderState("rendering");
+    setErrorMsg(null);
+    toast.info("Rendering... downloading video & processing with ffmpeg (30-90s)");
+
     try {
-      const result = await renderClip(clip.id);
-      setClipStatus("downloaded");
-      toast.success(`Clip ready! (${formatBytes(result.fileSize)})`);
+      // Call render endpoint — it returns the MP4 file directly as a blob
+      const response = await fetch(`/api/clips/${clip.id}/render`, {
+        method: "POST",
+        // Don't set Accept: application/json — we want the file directly
+      });
+
+      if (!response.ok) {
+        // Try to parse error message from JSON response
+        let message = "Render failed";
+        try {
+          const data = await response.json();
+          message = data?.error || message;
+        } catch {
+          message = `Render failed (HTTP ${response.status})`;
+        }
+        throw new Error(message);
+      }
+
+      // Get the video file as a blob
+      const blob = await response.blob();
+
+      if (blob.size === 0) {
+        throw new Error("Rendered file is empty");
+      }
+
+      // Trigger download in the browser
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const fileName = `${clip.title
+        .replace(/[^a-zA-Z0-9-_ ]/g, "")
+        .trim()
+        .slice(0, 50)}.mp4`;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      setRenderState("ready");
+      toast.success(`Clip ready! Downloaded (${formatBytes(blob.size)})`);
     } catch (err) {
-      setClipStatus("failed");
-      toast.error(err instanceof Error ? err.message : "Render failed");
-    } finally {
-      setIsRendering(false);
+      setRenderState("failed");
+      const msg = err instanceof Error ? err.message : "Render failed";
+      setErrorMsg(msg);
+      toast.error(msg);
     }
   }
 
-  function handleDownload() {
-    window.open(getDownloadUrl(clip.id), "_blank");
+  async function handleDownloadAgain() {
+    // Re-trigger download if the file was already rendered
+    // But on Railway ephemeral disk, the file might be gone — so re-render
+    handleRenderAndDownload();
   }
 
   return (
@@ -116,17 +161,23 @@ export function ClipCard({ clip, video }: Props) {
           {formatDuration(clip.duration)}
         </div>
 
-        {/* Status badge - show if rendering/downloaded */}
-        {clipStatus === "downloading" && (
+        {/* Status badge */}
+        {renderState === "rendering" && (
           <div className="absolute right-3 bottom-3 flex items-center gap-1.5 rounded-full bg-violet-500/80 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-md">
             <Loader2 className="size-3 animate-spin" />
             Rendering...
           </div>
         )}
-        {clipStatus === "downloaded" && (
+        {renderState === "ready" && (
           <div className="absolute right-3 bottom-3 flex items-center gap-1.5 rounded-full bg-emerald-500/80 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-md">
             <Check className="size-3" />
-            Ready
+            Done
+          </div>
+        )}
+        {renderState === "failed" && (
+          <div className="absolute right-3 bottom-3 flex items-center gap-1.5 rounded-full bg-red-500/80 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-md">
+            <AlertCircle className="size-3" />
+            Failed
           </div>
         )}
 
@@ -174,6 +225,13 @@ export function ClipCard({ clip, video }: Props) {
           </div>
         )}
 
+        {/* Error message */}
+        {renderState === "failed" && errorMsg && (
+          <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-300">
+            {errorMsg}
+          </div>
+        )}
+
         {/* Primary actions: Preview + Render/Download */}
         <div className="flex items-center gap-2">
           <Button
@@ -186,36 +244,37 @@ export function ClipCard({ clip, video }: Props) {
             Preview
           </Button>
 
-          {clipStatus === "downloaded" ? (
+          {renderState === "ready" ? (
             <Button
               size="sm"
               variant="default"
-              onClick={handleDownload}
+              onClick={handleDownloadAgain}
               className="h-8 flex-1 gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white hover:from-emerald-600 hover:to-teal-600"
             >
               <Download className="size-3.5" />
-              Download
+              Download Again
+            </Button>
+          ) : renderState === "rendering" ? (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled
+              className="h-8 flex-1 gap-1.5"
+            >
+              <Loader2 className="size-3.5 animate-spin" />
+              Rendering...
             </Button>
           ) : (
             <Button
               size="sm"
-              variant="outline"
-              onClick={handleRender}
-              disabled={isRendering}
-              className="h-8 flex-1 gap-1.5"
-              title="Render this clip into a 9:16 video with subtitles"
+              variant="default"
+              onClick={handleRenderAndDownload}
+              disabled={renderState === "rendering"}
+              className="h-8 flex-1 gap-1.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white hover:from-amber-600 hover:to-orange-600"
+              title="Render & download this clip as 16:9 video with subtitles"
             >
-              {isRendering ? (
-                <>
-                  <Loader2 className="size-3.5 animate-spin" />
-                  Rendering...
-                </>
-              ) : (
-                <>
-                  <Film className="size-3.5" />
-                  Render
-                </>
-              )}
+              <Film className="size-3.5" />
+              Render & Download
             </Button>
           )}
         </div>
@@ -253,10 +312,22 @@ export function ClipCard({ clip, video }: Props) {
         </div>
 
         {/* Render info hint */}
-        {clipStatus === "generated" && (
+        {renderState === "idle" && (
           <p className="text-[11px] text-muted-foreground">
-            Click <strong>Render</strong> to create a 9:16 video with subtitles
-            (takes 30-90s)
+            Click <strong>Render &amp; Download</strong> to create a 16:9 video
+            with subtitles + face tracking (30-90s)
+          </p>
+        )}
+        {renderState === "rendering" && (
+          <p className="text-[11px] text-violet-300">
+            Downloading video, cutting segment, cropping to 16:9, detecting
+            faces, burning subtitles...
+          </p>
+        )}
+        {renderState === "ready" && (
+          <p className="text-[11px] text-emerald-300">
+            ✓ Video rendered as 16:9 with subtitles. Click Download Again to
+            re-download.
           </p>
         )}
       </div>

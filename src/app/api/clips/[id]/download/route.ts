@@ -1,11 +1,10 @@
-// GET /api/clips/[clipId]/download
+// GET /api/clips/[id]/download
 // Streams the rendered clip video file to the client.
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getClipFilePath } from "@/lib/video-processor";
-import { statSync } from "node:fs";
-import { ReadStream } from "node:fs";
+import { statSync, createReadStream } from "node:fs";
 import { Readable } from "node:stream";
 
 export const runtime = "nodejs";
@@ -13,10 +12,10 @@ export const dynamic = "force-dynamic";
 
 export async function GET(
   _req: NextRequest,
-  { params }: { params: Promise<{ clipId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { clipId } = await params;
+    const clipId = (await params).id;
 
     const clip = await db.clip.findUnique({ where: { id: clipId } });
     if (!clip) {
@@ -27,7 +26,7 @@ export async function GET(
       return NextResponse.json(
         {
           error:
-            "Clip has not been rendered yet. Call POST /api/clips/[clipId]/render first.",
+            "Clip has not been rendered yet. Call POST /api/clips/[id]/render first.",
         },
         { status: 409 }
       );
@@ -54,7 +53,7 @@ export async function GET(
       .trim()
       .slice(0, 50)}.mp4`;
 
-    const stream: ReadStream = createReadStream(filePath);
+    const stream = createReadStream(filePath);
     const readable = Readable.toWeb(stream) as unknown as ReadableStream;
 
     return new NextResponse(readable, {
@@ -74,6 +73,3 @@ export async function GET(
     );
   }
 }
-
-// Need to import createReadStream here since we used it in the function
-import { createReadStream } from "node:fs";

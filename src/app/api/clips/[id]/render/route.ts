@@ -1,4 +1,4 @@
-// POST /api/clips/[clipId]/render
+// POST /api/clips/[id]/render
 // Renders a clip into a downloadable 9:16 video with subtitles.
 // This is a long-running operation (30-90s) that downloads the source video
 // and processes it with ffmpeg.
@@ -14,10 +14,10 @@ export const maxDuration = 300; // 5 minutes for rendering
 
 export async function POST(
   _req: NextRequest,
-  { params }: { params: Promise<{ clipId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { clipId } = await params;
+    const clipId = (await params).id;
 
     const clip = await db.clip.findUnique({
       where: { id: clipId },
@@ -42,7 +42,7 @@ export async function POST(
     // Re-fetch the updated clip
     const updated = await db.clip.findUnique({
       where: { id: clipId },
-    });
+    }); // clipId already extracted above
 
     if (!updated) {
       return NextResponse.json(

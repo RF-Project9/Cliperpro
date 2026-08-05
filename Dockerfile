@@ -24,7 +24,9 @@ FROM oven/bun:1-debian AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
-ENV PORT=3000
+# Do NOT hardcode PORT — Railway injects it automatically (usually 8080).
+# Next.js standalone reads process.env.PORT at startup, so it will bind
+# to whatever Railway assigns.
 ENV HOSTNAME=0.0.0.0
 
 # Install runtime libraries Prisma needs (libssl3 is already in Debian, but be safe)
@@ -50,7 +52,8 @@ COPY --from=builder /app/prisma ./prisma
 # Copy package.json (needed for `bun run` scripts: db:deploy / start:prod)
 COPY --from=builder /app/package.json ./package.json
 
-EXPOSE 3000
+# No EXPOSE needed — Railway auto-detects the port from $PORT env var.
+# The app listens on $PORT (injected by Railway) at HOSTNAME=0.0.0.0.
 
 # Run db:deploy (safe, no data loss) then start the server
 CMD ["sh", "-c", "bun run db:deploy && bun run start:prod"]

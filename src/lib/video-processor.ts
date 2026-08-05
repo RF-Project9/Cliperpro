@@ -125,6 +125,7 @@ export async function downloadVideo(
   });
 
   let lastError = "";
+  const allErrors: string[] = [];
   for (let i = 0; i < methods.length; i++) {
     const { name, fn } = methods[i];
     try {
@@ -148,14 +149,15 @@ export async function downloadVideo(
       }
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
+      allErrors.push(`[${name}] ${lastError.slice(0, 400)}`);
       console.warn(
         `[video] method "${name}" failed:`,
-        lastError.slice(0, 300)
+        lastError.slice(0, 400)
       );
     }
   }
 
-  // All methods failed — give clear guidance
+  // All methods failed — give clear guidance with ALL errors
   let hint = "";
   if (!hasCookies) {
     hint =
@@ -168,18 +170,40 @@ export async function downloadVideo(
       "This makes YouTube see requests as coming from your logged-in session.";
   } else {
     hint =
-      "Cookies were set but all methods still failed. " +
-      "Your cookies may be expired — re-export them from your browser and update YOUTUBE_COOKIES. " +
-      "Or the video may be private/age-restricted.";
+      "Cookies were set but all methods still failed. Common causes: " +
+      "(1) Cookies are EXPIRED — re-export from browser and update YOUTUBE_COOKIES. " +
+      "(2) YouTube requires a PO Token (Proof of Origin) which yt-dlp may need configured. " +
+      "(3) The video may be private/age-restricted/DRM-protected. " +
+      "(4) YouTube is aggressively blocking this specific Railway server IP. " +
+      "Try a different video first to rule out video-specific issues.";
   }
 
   throw new Error(
-    `All download methods failed for ${youtubeId}. ` +
-      `YouTube is blocking this server's IP. Last error: ${lastError.slice(
-        0,
-        300
-      )}. ${hint}`
+    `All ${methods.length} download methods failed for ${youtubeId}.\n` +
+      `=== ALL METHOD ERRORS ===\n${allErrors.join("\n")}\n` +
+      `=== END ERRORS ===\n` +
+      `${hint}`
   );
+}
+
+/**
+ * Extract the human-readable YouTube error from yt-dlp's stderr output.
+ * yt-dlp logs verbose info, but the actual error is usually after "ERROR:".
+ */
+function extractYouTubeError(stderr: string): string {
+  if (!stderr) return "";
+  // Look for ERROR: lines (yt-dlp format)
+  const errorLines = stderr
+    .split("\n")
+    .filter((l) => l.includes("ERROR:") || l.includes("error:"))
+    .map((l) => l.replace(/^.*?ERROR:\s*/i, "").trim());
+  if (errorLines.length > 0) {
+    // Return the last (most specific) error
+    return errorLines[errorLines.length - 1];
+  }
+  // Fallback: last non-empty line
+  const lines = stderr.split("\n").map((l) => l.trim()).filter(Boolean);
+  return lines.length > 0 ? lines[lines.length - 1] : "";
 }
 
 /**
@@ -271,7 +295,18 @@ async function downloadWithYoutubei(
 
   console.log(`[video][youtubei] fetching video info for ${youtubeId}...`);
 
-  const info = await youtube.getInfo(youtubeId);
+  let info: any;
+  try {
+    info = await youtube.getInfo(youtubeId);
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    const errName = err?.name || "";
+    throw new Error(
+      `youtubei.js getInfo() failed: ${errName}: ${errMsg.slice(0, 400)}. ` +
+        `This usually means YouTube is blocking the request (even with cookies), ` +
+        `or the cookies are invalid/expired.`
+    );
+  }
   console.log(`[video][youtubei] got info, title: "${info.basic_info.title}"`);
 
   // Get streaming data
@@ -494,9 +529,19 @@ async function downloadWithYtDlp(
     });
     console.log(`[video][yt-dlp] stdout:`, stdout.slice(0, 300));
     console.log(`[video][yt-dlp] stderr:`, stderr.slice(0, 300));
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`yt-dlp (${playerClient}${cookiesLabel}) failed: ${message.slice(0, 500)}`);
+  } catch (err: any) {
+    // Capture the FULL error output — yt-dlp's real error is in err.stderr
+    const stderr = err?.stderr || "";
+    const stdout = err?.stdout || "";
+    const cmdMessage = err instanceof Error ? err.message : String(err);
+    // Extract the actual YouTube error from stderr (last non-empty line)
+    const ytError = extractYouTubeError(stderr);
+    const fullError =
+      `yt-dlp (${playerClient}${cookiesLabel}) failed: ` +
+      `${ytError || cmdMessage.slice(0, 200)}` +
+      (stderr ? ` | full stderr: ${stderr.slice(0, 600)}` : "");
+    console.error(`[video][yt-dlp] FULL ERROR:`, fullError);
+    throw new Error(fullError);
   }
 
   // Find the output file (yt-dlp might output to different paths)

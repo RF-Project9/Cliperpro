@@ -1,0 +1,23 @@
+# Replace cliperpro.yourdomain.com with your actual domain
+# Caddy will automatically provision SSL certificates (Let's Encrypt)
+
+cliperpro.yourdomain.com {
+    reverse_proxy app:3000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Increase max upload size for video processing
+    request_body {
+        max_size 500MB
+    }
+
+    # timeouts for long video processing
+    timeouts {
+        read 5m
+        write 5m
+        idle 5m
+    }
+}

@@ -1,0 +1,71 @@
+version: "3.8"
+
+# ViralClip AI — VPS Deployment (Docker Compose)
+# Run: docker compose up -d
+# This deploys:
+#   - ViralClip AI app (Next.js + Prisma + video processor)
+#   - PostgreSQL database
+#   - Caddy reverse proxy (auto HTTPS)
+
+services:
+  # ─────────────────────────────────────────────
+  # PostgreSQL Database
+  # ─────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cliperpro
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cliperpro_secret_change_me}
+      POSTGRES_DB: cliperpro
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cliperpro"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # ViralClip AI App
+  # ─────────────────────────────────────────────
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://cliperpro:${POSTGRES_PASSWORD:-cliperpro_secret_change_me}@db:5432/cliperpro
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      YOUTUBE_COOKIES: ${YOUTUBE_COOKIES:-}
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+    volumes:
+      - video_cache:/tmp/viralclip-videos
+    ports:
+      - "3000:3000"
+
+  # ─────────────────────────────────────────────
+  # Caddy — Auto HTTPS reverse proxy
+  # ─────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  postgres_data:
+  video_cache:
+  caddy_data:
+  caddy_config:

@@ -353,13 +353,18 @@ async function downloadWithYoutubei(
   const tempAudio = join(DOWNLOAD_CACHE_DIR, `${youtubeId}.audio.mp4`);
 
   console.log(`[video][youtubei] downloading video stream...`);
-  // youtubei.js formats have a .download() method that returns a ReadableStream
-  const videoReadable = await videoStream.download();
-  await streamToFile(videoReadable, tempVideo);
+  // youtubei.js v17: Format objects have a .url property (signed URL).
+  // Download via HTTP fetch with proper headers.
+  if (!videoStream.url) {
+    throw new Error("Video stream has no URL — youtubei.js API changed");
+  }
+  await downloadStreamToFile(videoStream.url, tempVideo, youtube);
 
   console.log(`[video][youtubei] downloading audio stream...`);
-  const audioReadable = await audioStream.download();
-  await streamToFile(audioReadable, tempAudio);
+  if (!audioStream.url) {
+    throw new Error("Audio stream has no URL — youtubei.js API changed");
+  }
+  await downloadStreamToFile(audioStream.url, tempAudio, youtube);
 
   // Merge with ffmpeg
   console.log(`[video][youtubei] merging video+audio with ffmpeg...`);
@@ -459,7 +464,58 @@ export function validateYouTubeCookies(content: string): {
 }
 
 /**
+ * Download a YouTube stream URL to a file using HTTP fetch.
+ * YouTube streaming URLs require specific headers (range requests, user-agent).
+ */
+async function downloadStreamToFile(
+  streamUrl: string,
+  filePath: string,
+  youtubeInstance?: any
+): Promise<void> {
+  console.log(`[video][youtubei] downloading stream → ${filePath}`);
+
+  const response = await fetch(streamUrl, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Accept": "*/*",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Range": "bytes=0-",
+      // YouTube sometimes requires these
+      "Origin": "https://www.youtube.com",
+      "Referer": "https://www.youtube.com/",
+    },
+  });
+
+  if (!response.ok && response.status !== 206) {
+    throw new Error(
+      `Stream download failed: HTTP ${response.status} ${response.statusText}`
+    );
+  }
+
+  if (!response.body) {
+    throw new Error("Stream download returned no body");
+  }
+
+  // Convert Web ReadableStream to Node stream and save to file
+  const nodeStream = Readable.fromWeb(response.body as any);
+  const writer = createWriteStream(filePath);
+
+  return new Promise((resolve, reject) => {
+    nodeStream.pipe(writer);
+    writer.on("finish", () => {
+      const size = statSync(filePath).size;
+      console.log(`[video][youtubei] stream downloaded: ${formatBytes(size)}`);
+      resolve();
+    });
+    writer.on("error", reject);
+    nodeStream.on("error", reject);
+  });
+}
+
+/**
  * Save a youtubei.js stream (ReadableStream or similar) to a file.
+ * Kept as fallback for older youtubei.js versions that support .download().
  */
 async function streamToFile(stream: any, filePath: string): Promise<void> {
   return new Promise((resolve, reject) => {

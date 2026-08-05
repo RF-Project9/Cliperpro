@@ -781,7 +781,140 @@ async function getVideoDuration(filePath: string): Promise<number> {
 }
 
 /**
+ * Generate an ASS subtitle file with WORD-BY-WORD karaoke timing.
+ *
+ * This creates TikTok/Shorts-style subtitles where:
+ * - Text is broken into short phrases (2-4 words)
+ * - Each word highlights (yellow) as it's spoken
+ * - Large, bold text at bottom-center
+ * - High contrast for mobile viewing
+ *
+ * ASS format supports \k tags (karaoke) that ffmpeg's subtitles filter
+ * can render with word highlighting.
+ */
+export function generateASS(
+  clip: ClipItem,
+  clipDuration: number
+): string {
+  if (!clip.transcript) return "";
+
+  const lines = clip.transcript
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) return "";
+
+  // Parse timestamped lines or distribute evenly
+  let entries: { start: number; end: number; text: string }[] = [];
+
+  const timestamped = lines.every((l) => /^\[\d+:\d+\]/.test(l));
+  if (timestamped) {
+    for (const line of lines) {
+      const match = line.match(/^\[(\d+):(\d+)\]\s*(.+)$/);
+      if (match) {
+        const [, mm, ss, text] = match;
+        const time = parseInt(mm) * 60 + parseInt(ss);
+        if (time >= clip.startTime && time <= clip.endTime) {
+          entries.push({
+            start: time - clip.startTime,
+            end: time - clip.startTime + 3,
+            text: text.trim(),
+          });
+        }
+      }
+    }
+    for (let i = 0; i < entries.length - 1; i++) {
+      entries[i].end = Math.min(entries[i].end, entries[i + 1].start);
+    }
+    if (entries.length > 0) {
+      entries[entries.length - 1].end = clipDuration;
+    }
+  } else {
+    const perLine = clipDuration / lines.length;
+    lines.forEach((text, i) => {
+      entries.push({ start: i * perLine, end: (i + 1) * perLine, text });
+    });
+  }
+
+  if (entries.length === 0) return "";
+
+  // Build ASS file
+  const ass = `[Script Info]
+Title: ViralClip AI Subtitles
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+PlayResX: 1080
+PlayResY: 1920
+YCbCr Matrix: TV.709
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Main,Arial Black,72,&H00FFFFFF,&H0000F9FF,&H00000000,&HAA000000,-1,0,0,0,100,100,0,0,1,6,3,2,60,60,350,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+`;
+
+  const dialogueLines: string[] = [];
+
+  for (const entry of entries) {
+    const words = entry.text.split(/\s+/).filter(Boolean);
+    if (words.length === 0) continue;
+
+    // Break into phrases of 2-4 words for Shorts-style display
+    const phraseSize = Math.min(4, Math.max(2, Math.ceil(words.length / 3)));
+    const phrases: string[][] = [];
+    for (let i = 0; i < words.length; i += phraseSize) {
+      phrases.push(words.slice(i, i + phraseSize));
+    }
+
+    const phraseDuration = (entry.end - entry.start) / phrases.length;
+
+    phrases.forEach((phrase, pIdx) => {
+      const phraseStart = entry.start + pIdx * phraseDuration;
+      const phraseEnd = phraseStart + phraseDuration;
+      const wordDur = phraseDuration / phrase.length;
+
+      // Build karaoke text: {\k20}word1 {\k20}word2 ...
+      // \k = karaoke highlight (in centiseconds)
+      // Each word gets its own timing
+      const karaokeText = phrase
+        .map((word) => {
+          const cs = Math.max(5, Math.round(wordDur * 10)); // centiseconds
+          return `{\\k${cs}}${word}`;
+        })
+        .join(" ");
+
+      dialogueLines.push(
+        `Dialogue: 0,${formatASSTime(phraseStart)},${formatASSTime(
+          phraseEnd
+        )},Main,,0,0,0,,${karaokeText}`
+      );
+    });
+  }
+
+  return ass + dialogueLines.join("\n") + "\n";
+}
+
+/**
+ * Format time for ASS subtitles: H:MM:SS.cs (centiseconds)
+ */
+function formatASSTime(seconds: number): string {
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  const cs = Math.floor((seconds % 1) * 100);
+  return `${hrs}:${String(mins).padStart(2, "0")}:${String(secs).padStart(
+    2,
+    "0"
+  )}.${String(cs).padStart(2, "0")}`;
+}
+
+/**
  * Generate an SRT subtitle file from the clip's transcript.
+ * (Kept for backward compatibility, but ASS is preferred for karaoke effect)
  */
 export function generateSRT(
   clip: ClipItem,
@@ -796,19 +929,16 @@ export function generateSRT(
 
   if (lines.length === 0) return "";
 
-  // Check if lines have [mm:ss] timestamps from source transcript
   const timestamped = lines.every((l) => /^\[\d+:\d+\]/.test(l));
 
   let srtEntries: { start: number; end: number; text: string }[] = [];
 
   if (timestamped) {
-    // Use existing timestamps, offset to start at 0
     for (const line of lines) {
       const match = line.match(/^\[(\d+):(\d+)\]\s*(.+)$/);
       if (match) {
         const [, mm, ss, text] = match;
         const time = parseInt(mm) * 60 + parseInt(ss);
-        // Only include lines within the clip's time range
         if (time >= clip.startTime && time <= clip.endTime) {
           srtEntries.push({
             start: time - clip.startTime,
@@ -818,7 +948,6 @@ export function generateSRT(
         }
       }
     }
-    // Fix overlapping
     for (let i = 0; i < srtEntries.length - 1; i++) {
       srtEntries[i].end = Math.min(srtEntries[i].end, srtEntries[i + 1].start);
     }
@@ -826,14 +955,9 @@ export function generateSRT(
       srtEntries[srtEntries.length - 1].end = clipDuration;
     }
   } else {
-    // Distribute text evenly across the clip duration
     const perLine = clipDuration / lines.length;
     lines.forEach((text, i) => {
-      srtEntries.push({
-        start: i * perLine,
-        end: (i + 1) * perLine,
-        text,
-      });
+      srtEntries.push({ start: i * perLine, end: (i + 1) * perLine, text });
     });
   }
 
@@ -940,12 +1064,16 @@ async function detectCropRegion(
 }
 
 /**
- * Process a clip: cut from source video, crop to 16:9 (face-aware), burn subtitles.
+ * Process a clip: cut from source video, crop to 9:16 (face-aware), burn subtitles.
  *
- * Output: 1920x1080 (16:9 horizontal) — standard YouTube format.
+ * Output: 1080x1920 (9:16 vertical) — YouTube Shorts format.
  *
  * Face tracking: uses ffmpeg's cropdetect to find the active region (faces/motion),
- * then crops to 16:9 centered on that region. If detection fails, uses center crop.
+ * then crops to 9:16 centered on that region. If detection fails, uses center crop
+ * with top bias (faces usually in upper portion of frame).
+ *
+ * Subtitles: ASS format with word-by-word karaoke highlighting (TikTok/Shorts style).
+ * Each word highlights (yellow) as it's spoken.
  *
  * @returns path to the processed video file
  */
@@ -955,15 +1083,15 @@ export async function processClip(
 ): Promise<string> {
   ensureDirs();
   const outputPath = join(OUTPUT_DIR, `${clip.id}.mp4`);
-  const srtPath = join(OUTPUT_DIR, `${clip.id}.srt`);
+  const assPath = join(OUTPUT_DIR, `${clip.id}.ass`);
 
-  // Generate subtitle file
+  // Generate ASS subtitle file (word-by-word karaoke style)
   const clipDuration = clip.endTime - clip.startTime;
-  const srtContent = generateSRT(clip, clipDuration);
-  if (srtContent) {
-    await writeFile(srtPath, srtContent, "utf-8");
+  const assContent = generateASS(clip, clipDuration);
+  if (assContent) {
+    await writeFile(assPath, assContent, "utf-8");
     console.log(
-      `[video] generated SRT: ${srtPath} (${srtContent.length} chars)`
+      `[video] generated ASS subtitles: ${assPath} (${assContent.length} chars)`
     );
   }
 
@@ -982,37 +1110,38 @@ export async function processClip(
     clipDuration
   );
 
-  // Calculate 16:9 crop dimensions
-  // Target output: 1920x1080 (16:9 horizontal)
+  // Calculate 9:16 crop dimensions (VERTICAL for YouTube Shorts)
+  // Target output: 1080x1920 (9:16 vertical)
   let cropWidth: number;
   let cropHeight: number;
   let cropX: number;
   let cropY: number;
 
   if (detectedCrop) {
-    // Use detected region, but ensure 16:9 aspect ratio
+    // Use detected region, but ensure 9:16 aspect ratio (vertical)
     const detectedAspect =
       detectedCrop.width / detectedCrop.height;
-    if (detectedAspect > 16 / 9) {
-      // Too wide — use height, calculate width for 16:9
+    if (detectedAspect > 9 / 16) {
+      // Too wide — use height, calculate width for 9:16
       cropHeight = detectedCrop.height;
-      cropWidth = Math.round(cropHeight * 16 / 9);
+      cropWidth = Math.round(cropHeight * 9 / 16);
     } else {
-      // Too tall — use width, calculate height for 16:9
+      // Too tall — use width, calculate height for 9:16
       cropWidth = detectedCrop.width;
-      cropHeight = Math.round(cropWidth * 9 / 16);
+      cropHeight = Math.round(cropWidth * 16 / 9);
     }
-    // Center on detected region
+    // Center on detected region (face area)
     cropX =
       detectedCrop.x + Math.round((detectedCrop.width - cropWidth) / 2);
     cropY =
       detectedCrop.y + Math.round((detectedCrop.height - cropHeight) / 2);
   } else {
-    // Center crop: use full height, calculate width for 16:9
+    // Center crop: use full HEIGHT, calculate width for 9:16 vertical
+    // For talking-head videos, face is usually in center-upper area
     cropHeight = srcHeight;
-    cropWidth = Math.round(cropHeight * 16 / 9);
+    cropWidth = Math.round(cropHeight * 9 / 16);
     cropX = Math.max(0, Math.round((srcWidth - cropWidth) / 2));
-    cropY = 0;
+    cropY = 0; // top-aligned to capture faces
   }
 
   // Ensure crop dimensions are even numbers (ffmpeg requirement for libx264)
@@ -1031,33 +1160,27 @@ export async function processClip(
 
   console.log(
     `[video] processing clip ${clip.id}: ${clip.startTime}s-${clip.endTime}s, ` +
-      `crop ${cropWidth}x${cropHeight} at (${cropX},${cropY}) → scale to 1920x1080`
+      `crop ${cropWidth}x${cropHeight} at (${cropX},${cropY}) → scale to 1080x1920 (9:16 vertical)`
   );
 
   // Build ffmpeg filter chain:
-  //   1. crop to detected/centered region (16:9 aspect)
-  //   2. scale to 1920x1080 (16:9 output)
-  //   3. burn subtitles (if SRT exists)
+  //   1. crop to detected/centered region (9:16 aspect, face-biased)
+  //   2. scale to 1080x1920 (9:16 vertical output for YouTube Shorts)
+  //   3. burn ASS subtitles (word-by-word karaoke style)
   const filters: string[] = [
     `crop=${cropWidth}:${cropHeight}:${cropX}:${cropY}`,
-    `scale=1920:1080:force_original_aspect_ratio=decrease`,
-    `pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black`,
+    `scale=1080:1920:force_original_aspect_ratio=decrease`,
+    `pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black`,
+    // Slight scale up for "punch in" effect (makes video feel closer/dynamic)
+    `scale=1188:2112:flags=lanczos`,
+    `crop=1080:1920:54:108`,
   ];
 
-  if (srtContent) {
-    const subtitleStyle = [
-      "FontSize=14",
-      "FontName=Arial",
-      "PrimaryColour=&H00FFFFFF", // white
-      "OutlineColour=&H00000000", // black outline
-      "BorderStyle=3", // opaque box
-      "Outline=2",
-      "Shadow=1",
-      "Alignment=2", // bottom center
-      "MarginV=60", // 60px from bottom
-    ].join(",");
-    const escapedSrt = srtPath.replace(/:/g, "\\:");
-    filters.push(`subtitles='${escapedSrt}':force_style='${subtitleStyle}'`);
+  if (assContent) {
+    // ASS subtitles support karaoke (\k tags) for word-by-word highlighting
+    // ffmpeg renders ASS natively with full styling support
+    const escapedAss = assPath.replace(/:/g, "\\:");
+    filters.push(`subtitles='${escapedAss}'`);
   }
 
   const filterComplex = filters.join(",");

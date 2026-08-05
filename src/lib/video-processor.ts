@@ -46,11 +46,15 @@ function ensureDirs() {
  * Download a YouTube video.
  *
  * Strategy (tries multiple methods since YouTube blocks cloud IPs):
- *   1. youtubei.js (Innertube API) — pure JS, best at bypassing bot detection
- *   2. yt-dlp with iOS client — iOS client often less blocked than android/web
- *   3. yt-dlp with default settings — last resort
+ *   1. youtubei.js (Innertube API) WITH cookies — most reliable with auth
+ *   2. yt-dlp WITH cookies (iOS client) — cookies make yt-dlp work too
+ *   3. yt-dlp WITH cookies (web client)
+ *   4. youtubei.js WITHOUT cookies
+ *   5. yt-dlp WITHOUT cookies (various clients)
  *
- * Caches by videoId so we don't re-download for each clip of the same video.
+ * YouTube cookies are read from YOUTUBE_COOKIES env var (base64-encoded
+ * Netscape cookies.txt format). Get them from your browser using a
+ * "Get cookies.txt" extension while logged into YouTube.
  */
 export async function downloadVideo(
   youtubeId: string
@@ -65,68 +69,202 @@ export async function downloadVideo(
     return { path: outputPath, duration };
   }
 
-  console.log(`[video] downloading ${youtubeId}...`);
+  // Load YouTube cookies from env var if available
+  const cookiesFile = await loadYouTubeCookies();
+  const hasCookies = cookiesFile !== null;
+  console.log(
+    `[video] downloading ${youtubeId}... (cookies: ${hasCookies ? "YES" : "NO"})`
+  );
 
-  // Try each download method in sequence
-  const methods = [
-    () => downloadWithYoutubei(youtubeId, outputPath),
-    () => downloadWithYtDlp(youtubeId, outputPath, "ios,android,web"),
-    () => downloadWithYtDlp(youtubeId, outputPath, "ios"),
-    () => downloadWithYtDlp(youtubeId, outputPath, "tv,web_safari"),
-    () => downloadWithYtDlp(youtubeId, outputPath, "default"),
-  ];
+  if (!hasCookies) {
+    console.warn(
+      "[video] ⚠️ No YOUTUBE_COOKIES env var set. YouTube will likely block this request."
+    );
+    console.warn(
+      "[video] To fix: export YouTube cookies from your browser (Get cookies.txt extension),"
+    );
+    console.warn(
+      "[video] base64-encode them, and set YOUTUBE_COOKIES env var on Railway."
+    );
+  }
+
+  // Build list of download methods — try WITH cookies first
+  const methods: { name: string; fn: () => Promise<void> }[] = [];
+
+  if (hasCookies) {
+    methods.push({
+      name: "youtubei.js + cookies",
+      fn: () => downloadWithYoutubei(youtubeId, outputPath, cookiesFile!),
+    });
+    methods.push({
+      name: "yt-dlp + cookies (ios)",
+      fn: () => downloadWithYtDlp(youtubeId, outputPath, "ios", cookiesFile!),
+    });
+    methods.push({
+      name: "yt-dlp + cookies (web)",
+      fn: () => downloadWithYtDlp(youtubeId, outputPath, "web", cookiesFile!),
+    });
+    methods.push({
+      name: "yt-dlp + cookies (mweb)",
+      fn: () => downloadWithYtDlp(youtubeId, outputPath, "mweb", cookiesFile!),
+    });
+  }
+
+  // Always try without cookies too (in case cookies are invalid)
+  methods.push({
+    name: "youtubei.js (no cookies)",
+    fn: () => downloadWithYoutubei(youtubeId, outputPath, null),
+  });
+  methods.push({
+    name: "yt-dlp (ios)",
+    fn: () => downloadWithYtDlp(youtubeId, outputPath, "ios", null),
+  });
+  methods.push({
+    name: "yt-dlp (tv,web_safari)",
+    fn: () => downloadWithYtDlp(youtubeId, outputPath, "tv,web_safari", null),
+  });
 
   let lastError = "";
   for (let i = 0; i < methods.length; i++) {
+    const { name, fn } = methods[i];
     try {
-      console.log(`[video] trying download method ${i + 1}/${methods.length}...`);
-      await methods[i]();
+      console.log(`[video] trying method ${i + 1}/${methods.length}: ${name}`);
+      await fn();
 
       if (existsSync(outputPath)) {
         const duration = await getVideoDuration(outputPath);
         const size = statSync(outputPath).size;
         if (size > 10000) {
-          // sanity check — file should be > 10KB
           console.log(
-            `[video] SUCCESS with method ${i + 1}: ${youtubeId} downloaded, ${duration}s, ${formatBytes(size)}`
+            `[video] ✅ SUCCESS with "${name}": ${youtubeId} downloaded, ${duration}s, ${formatBytes(size)}`
           );
           return { path: outputPath, duration };
         } else {
-          console.warn(`[video] method ${i + 1} produced tiny file (${size}B), trying next`);
+          console.warn(
+            `[video] method "${name}" produced tiny file (${size}B), trying next`
+          );
           rmSync(outputPath, { force: true });
         }
       }
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
-      console.warn(`[video] method ${i + 1} failed:`, lastError.slice(0, 300));
+      console.warn(
+        `[video] method "${name}" failed:`,
+        lastError.slice(0, 300)
+      );
     }
+  }
+
+  // All methods failed — give clear guidance
+  let hint = "";
+  if (!hasCookies) {
+    hint =
+      "SOLUTION: Set YOUTUBE_COOKIES env var on Railway. " +
+      "1) Install 'Get cookies.txt LOCALLY' browser extension. " +
+      "2) Log into YouTube in your browser. " +
+      "3) Export cookies for youtube.com. " +
+      "4) Base64-encode the file: base64 cookies.txt (or use an online tool). " +
+      "5) Set YOUTUBE_COOKIES=<base64string> on Railway Variables. " +
+      "This makes YouTube see requests as coming from your logged-in session.";
+  } else {
+    hint =
+      "Cookies were set but all methods still failed. " +
+      "Your cookies may be expired — re-export them from your browser and update YOUTUBE_COOKIES. " +
+      "Or the video may be private/age-restricted.";
   }
 
   throw new Error(
     `All download methods failed for ${youtubeId}. ` +
-      `YouTube is blocking this server's IP (cloud servers often get flagged as bots). ` +
-      `Last error: ${lastError.slice(0, 400)}. ` +
-      `Try again later, or use a different video.`
+      `YouTube is blocking this server's IP. Last error: ${lastError.slice(
+        0,
+        300
+      )}. ${hint}`
   );
 }
 
 /**
+ * Load YouTube cookies from YOUTUBE_COOKIES env var.
+ * Expects base64-encoded Netscape cookies.txt format.
+ * Writes to a temp file and returns the path (or null if not set).
+ */
+let cachedCookiesFile: string | null = null;
+let cookiesLoaded = false;
+
+async function loadYouTubeCookies(): Promise<string | null> {
+  if (cookiesLoaded) return cachedCookiesFile;
+  cookiesLoaded = true;
+
+  const encoded = process.env.YOUTUBE_COOKIES;
+  if (!encoded || encoded.trim() === "") {
+    return null;
+  }
+
+  try {
+    // Decode base64
+    const decoded = Buffer.from(encoded, "base64").toString("utf-8");
+
+    // Basic validation: should contain Netscape cookies format
+    if (!decoded.includes("#") && !decoded.includes(".youtube.com")) {
+      console.warn(
+        "[video] YOUTUBE_COOKIES doesn't look like Netscape cookies.txt format"
+      );
+      return null;
+    }
+
+    const cookiesPath = join(DOWNLOAD_CACHE_DIR, "youtube-cookies.txt");
+    await writeFile(cookiesPath, decoded, "utf-8");
+    cachedCookiesFile = cookiesPath;
+    console.log(`[video] loaded YouTube cookies: ${cookiesPath}`);
+    return cookiesPath;
+  } catch (err) {
+    console.warn(
+      "[video] failed to decode YOUTUBE_COOKIES env var:",
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
+}
+
+/**
  * Download using youtubei.js (Innertube API) — best at bypassing bot detection.
- * Gets streaming URLs via YouTube's internal API, then downloads video+audio
- * and merges them with ffmpeg.
+ * If cookies file is provided, YouTube sees requests as coming from your
+ * logged-in session (reliable way to bypass bot detection on cloud servers).
  */
 async function downloadWithYoutubei(
   youtubeId: string,
-  outputPath: string
+  outputPath: string,
+  cookiesFile: string | null
 ): Promise<void> {
   const Innertube = (await import("youtubei.js")).default;
-  const youtube = await Innertube.create();
+
+  // Load cookies into youtubei.js if available
+  let youtube: any;
+  if (cookiesFile) {
+    try {
+      const cookiesContent = await readFile(cookiesFile, "utf-8");
+      // Parse Netscape cookies.txt format into a cookie jar
+      const cookies = parseNetscapeCookies(cookiesContent);
+      youtube = await Innertube.create({
+        cookie: cookies,
+      });
+      console.log(`[video][youtubei] using ${cookies.length} cookies from file`);
+    } catch (err) {
+      console.warn(
+        "[video][youtubei] failed to load cookies, continuing without:",
+        err instanceof Error ? err.message : err
+      );
+      youtube = await Innertube.create();
+    }
+  } else {
+    youtube = await Innertube.create();
+  }
+
   console.log(`[video][youtubei] fetching video info for ${youtubeId}...`);
 
   const info = await youtube.getInfo(youtubeId);
   console.log(`[video][youtubei] got info, title: "${info.basic_info.title}"`);
 
-  // Get streaming data — choose best 720p video + best audio
+  // Get streaming data
   const streamingData = info.streaming_data;
   if (!streamingData) {
     throw new Error("No streaming data available (video may be private/DRM)");
@@ -205,7 +343,31 @@ async function downloadWithYoutubei(
   if (!existsSync(outputPath)) {
     throw new Error("ffmpeg merge finished but output not found");
   }
-  console.log(`[video][youtubei] merge complete: ${formatBytes(statSync(outputPath).size)}`);
+  console.log(
+    `[video][youtubei] merge complete: ${formatBytes(statSync(outputPath).size)}`
+  );
+}
+
+/**
+ * Parse Netscape cookies.txt format into array of { name, value } objects
+ * for youtubei.js.
+ */
+function parseNetscapeCookies(
+  content: string
+): Array<{ name: string; value: string; domain: string }> {
+  const cookies: Array<{ name: string; value: string; domain: string }> = [];
+  const lines = content.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    // Netscape format: domain  flag  path  secure  expiration  name  value
+    const parts = trimmed.split("\t");
+    if (parts.length >= 7) {
+      const [domain, , path, secure, expiration, name, value] = parts;
+      cookies.push({ name, value, domain });
+    }
+  }
+  return cookies;
 }
 
 /**
@@ -242,11 +404,13 @@ async function streamToFile(stream: any, filePath: string): Promise<void> {
 
 /**
  * Download using yt-dlp with a specific player client.
+ * If cookies file is provided, passes --cookies-file to yt-dlp.
  */
 async function downloadWithYtDlp(
   youtubeId: string,
   outputPath: string,
-  playerClient: string
+  playerClient: string,
+  cookiesFile: string | null
 ): Promise<void> {
   const url = `https://www.youtube.com/watch?v=${youtubeId}`;
   const tempOutput = join(DOWNLOAD_CACHE_DIR, `${youtubeId}.part`);
@@ -262,11 +426,17 @@ async function downloadWithYtDlp(
     "--no-check-certificates",
     "--extractor-args",
     `youtube:player_client=${playerClient}`,
-    "-o",
-    tempOutput,
   ];
 
-  console.log(`[video][yt-dlp] client=${playerClient}`);
+  // Add cookies file if available
+  if (cookiesFile) {
+    ytDlpArgs.push("--cookies", cookiesFile);
+  }
+
+  ytDlpArgs.push("-o", tempOutput);
+
+  const cookiesLabel = cookiesFile ? " + cookies" : "";
+  console.log(`[video][yt-dlp] client=${playerClient}${cookiesLabel}`);
   try {
     const { stdout, stderr } = await execFileAsync("yt-dlp", ytDlpArgs, {
       timeout: 300000,
@@ -276,7 +446,7 @@ async function downloadWithYtDlp(
     console.log(`[video][yt-dlp] stderr:`, stderr.slice(0, 300));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`yt-dlp (${playerClient}) failed: ${message.slice(0, 500)}`);
+    throw new Error(`yt-dlp (${playerClient}${cookiesLabel}) failed: ${message.slice(0, 500)}`);
   }
 
   // Find the output file (yt-dlp might output to different paths)

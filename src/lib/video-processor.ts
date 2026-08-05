@@ -18,10 +18,13 @@ import {
   statSync,
   createReadStream,
   renameSync,
+  createWriteStream,
 } from "node:fs";
 import { writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { Readable } from "node:stream";
+import path from "node:path";
 import { ClipItem } from "./types";
 import { db } from "./db";
 
@@ -209,7 +212,6 @@ async function downloadWithYoutubei(
  * Save a youtubei.js stream (ReadableStream or similar) to a file.
  */
 async function streamToFile(stream: any, filePath: string): Promise<void> {
-  const { createWriteStream } = await import("node:fs");
   return new Promise((resolve, reject) => {
     const writer = createWriteStream(filePath);
     // youtubei.js streams are typically Node streams or Web ReadableStreams
@@ -220,8 +222,7 @@ async function streamToFile(stream: any, filePath: string): Promise<void> {
       writer.on("error", reject);
     } else if (typeof stream.getReader === "function") {
       // Web ReadableStream — convert to Node stream
-      const { Readable } = require("node:stream");
-      const nodeStream = Readable.fromWeb(stream);
+      const nodeStream = Readable.fromWeb(stream as any);
       nodeStream.pipe(writer);
       writer.on("finish", resolve);
       writer.on("error", reject);

@@ -32,7 +32,7 @@ ENV HOSTNAME=0.0.0.0
 # Install runtime libraries:
 #   - openssl, ca-certificates: Prisma needs libssl3 (already in Debian, but be safe)
 #   - ffmpeg: video processing (cut, crop 9:16, burn subtitles)
-#   - yt-dlp: download YouTube videos for clip rendering
+#   - yt-dlp: download YouTube videos (latest version via pip)
 #   - python3, pip: yt-dlp is a Python tool
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -41,12 +41,13 @@ RUN apt-get update && \
       ffmpeg \
       python3 \
       python3-pip \
+      curl \
       && \
-    pip3 install --no-cache-dir --break-system-packages yt-dlp && \
+    pip3 install --no-cache-dir --break-system-packages -U yt-dlp && \
     rm -rf /var/lib/apt/lists/*
 
-# Verify yt-dlp and ffmpeg are available
-RUN yt-dlp --version && ffmpeg -version | head -1
+# Verify yt-dlp is installed and up to date
+RUN yt-dlp --version
 
 # Copy standalone Next.js build.
 # IMPORTANT: preserve the .next/standalone/ path because package.json's

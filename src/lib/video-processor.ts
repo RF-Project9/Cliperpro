@@ -353,10 +353,13 @@ async function downloadWithYoutubei(
   const tempAudio = join(DOWNLOAD_CACHE_DIR, `${youtubeId}.audio.mp4`);
 
   console.log(`[video][youtubei] downloading video stream...`);
-  await streamToFile(videoStream, tempVideo);
+  // youtubei.js formats have a .download() method that returns a ReadableStream
+  const videoReadable = await videoStream.download();
+  await streamToFile(videoReadable, tempVideo);
 
   console.log(`[video][youtubei] downloading audio stream...`);
-  await streamToFile(audioStream, tempAudio);
+  const audioReadable = await audioStream.download();
+  await streamToFile(audioReadable, tempAudio);
 
   // Merge with ffmpeg
   console.log(`[video][youtubei] merging video+audio with ffmpeg...`);
@@ -502,8 +505,13 @@ async function downloadWithYtDlp(
 
   const ytDlpArgs = [
     url,
+    // Use format sorting instead of strict format string.
+    // -S "res:720" = prefer resolution up to 720p
+    // "bestvideo+bestaudio/best" = merge best video+audio, fallback to single file
     "-f",
-    "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best",
+    "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best",
+    "-S",
+    "res:720,br",
     "--merge-output-format",
     "mp4",
     "--no-playlist",

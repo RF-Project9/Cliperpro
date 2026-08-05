@@ -72,24 +72,23 @@ export async function downloadVideo(
   // Load YouTube cookies from env var if available
   const cookiesFile = await loadYouTubeCookies();
   const hasCookies = cookiesFile !== null;
-  console.log(
-    `[video] downloading ${youtubeId}... (cookies: ${hasCookies ? "YES" : "NO"})`
-  );
+  console.log(`[video] downloading ${youtubeId}... (cookies: ${hasCookies ? "YES" : "NO"})`);
 
   if (!hasCookies) {
-    console.warn(
-      "[video] ⚠️ No YOUTUBE_COOKIES env var set. YouTube will likely block this request."
-    );
-    console.warn(
-      "[video] To fix: export YouTube cookies from your browser (Get cookies.txt extension),"
-    );
-    console.warn(
-      "[video] base64-encode them, and set YOUTUBE_COOKIES env var on Railway."
+    console.log(
+      "[video] ℹ️ No cookies set — trying pure-JS ytdl-core first (works great on residential IPs)"
     );
   }
 
-  // Build list of download methods — try WITH cookies first
+  // Build list of download methods — ytdl-core is THE most reliable on home IPs
   const methods: { name: string; fn: () => Promise<void> }[] = [];
+
+  // Method 0: @distube/ytdl-core — pure JavaScript, no Python/yt-dlp needed.
+  // Most reliable on residential IPs. Handles format selection automatically.
+  methods.push({
+    name: "ytdl-core (pure JS)",
+    fn: () => downloadWithYtdlCore(youtubeId, outputPath),
+  });
 
   if (hasCookies) {
     methods.push({
@@ -104,24 +103,18 @@ export async function downloadVideo(
       name: "yt-dlp + cookies (web)",
       fn: () => downloadWithYtDlp(youtubeId, outputPath, "web", cookiesFile!),
     });
-    methods.push({
-      name: "yt-dlp + cookies (mweb)",
-      fn: () => downloadWithYtDlp(youtubeId, outputPath, "mweb", cookiesFile!),
-    });
   }
 
-  // Always try without cookies too (in case cookies are invalid)
+  // Always try youtubei.js without cookies too
   methods.push({
     name: "youtubei.js (no cookies)",
     fn: () => downloadWithYoutubei(youtubeId, outputPath, null),
   });
+
+  // yt-dlp as last resort, with various clients
   methods.push({
-    name: "yt-dlp (ios)",
-    fn: () => downloadWithYtDlp(youtubeId, outputPath, "ios", null),
-  });
-  methods.push({
-    name: "yt-dlp (tv,web_safari)",
-    fn: () => downloadWithYtDlp(youtubeId, outputPath, "tv,web_safari", null),
+    name: "yt-dlp (default)",
+    fn: () => downloadWithYtDlp(youtubeId, outputPath, "default", null),
   });
 
   let lastError = "";
@@ -461,6 +454,141 @@ export function validateYouTubeCookies(content: string): {
     hasVisitorInfo,
     domains: Array.from(domains),
   };
+}
+
+/**
+ * Download using @distube/ytdl-core — pure JavaScript YouTube downloader.
+ * Most reliable on residential IPs. No Python/yt-dlp needed.
+ * Handles format selection automatically: picks best video+audio ≤720p.
+ */
+async function downloadWithYtdlCore(
+  youtubeId: string,
+  outputPath: string
+): Promise<void> {
+  const ytdl = (await import("@distube/ytdl-core")).default;
+  const url = `https://www.youtube.com/watch?v=${youtubeId}`;
+
+  console.log(`[video][ytdl-core] fetching info for ${youtubeId}...`);
+
+  const info = await ytdl.getInfo(url);
+  console.log(
+    `[video][ytdl-core] got info, title: "${info.videoDetails.title}"`
+  );
+
+  // Pick best video+audio format ≤720p
+  // ytdl.chooseFormat handles this automatically with quality 'highest'
+  // but we filter to ≤720p first
+  const format = ytdl.chooseFormat(info.formats, {
+    quality: "highest",
+    filter: (f) => {
+      // Video+audio combined, or we'll merge separately
+      const hasVideo = f.hasVideo;
+      const hasAudio = f.hasAudio;
+      const height = f.height || 0;
+      // Prefer combined video+audio ≤720p
+      if (hasVideo && hasAudio && height <= 720) return true;
+      // Or video-only ≤720p (we'll merge with audio)
+      if (hasVideo && !hasAudio && height <= 720) return true;
+      return false;
+    },
+  });
+
+  if (!format) {
+    throw new Error("No suitable video format found (≤720p)");
+  }
+
+  console.log(
+    `[video][ytdl-core] selected format: ${format.height}p, container: ${format.container}, hasVideo: ${format.hasVideo}, hasAudio: ${format.hasAudio}`
+  );
+
+  // Check if format has both video+audio
+  if (format.hasVideo && format.hasAudio) {
+    // Single stream — download directly
+    console.log(`[video][ytdl-core] downloading combined stream...`);
+    const videoStream = ytdl(url, { format });
+    const writer = createWriteStream(outputPath);
+
+    return new Promise((resolve, reject) => {
+      videoStream.pipe(writer);
+      writer.on("finish", () => {
+        const size = statSync(outputPath).size;
+        console.log(
+          `[video][ytdl-core] ✅ downloaded: ${formatBytes(size)}`
+        );
+        resolve();
+      });
+      writer.on("error", reject);
+      videoStream.on("error", reject);
+    });
+  }
+
+  // Video-only stream — need to download audio separately and merge
+  console.log(`[video][ytdl-core] video-only format, downloading audio too...`);
+
+  // Pick best audio
+  const audioFormat = ytdl.chooseFormat(info.formats, {
+    quality: "highestaudio",
+    filter: "audioonly",
+  });
+
+  if (!audioFormat) {
+    throw new Error("No audio format found");
+  }
+
+  const tempVideo = join(DOWNLOAD_CACHE_DIR, `${youtubeId}.ytdl.video.mp4`);
+  const tempAudio = join(DOWNLOAD_CACHE_DIR, `${youtubeId}.ytdl.audio.mp4`);
+
+  // Download video
+  console.log(`[video][ytdl-core] downloading video stream...`);
+  await new Promise<void>((resolve, reject) => {
+    ytdl(url, { format })
+      .pipe(createWriteStream(tempVideo))
+      .on("finish", resolve)
+      .on("error", reject);
+  });
+
+  // Download audio
+  console.log(`[video][ytdl-core] downloading audio stream...`);
+  await new Promise<void>((resolve, reject) => {
+    ytdl(url, { format: audioFormat })
+      .pipe(createWriteStream(tempAudio))
+      .on("finish", resolve)
+      .on("error", reject);
+  });
+
+  // Merge with ffmpeg
+  console.log(`[video][ytdl-core] merging video+audio with ffmpeg...`);
+  await execFileAsync(
+    "ffmpeg",
+    [
+      "-y",
+      "-i",
+      tempVideo,
+      "-i",
+      tempAudio,
+      "-c:v",
+      "copy",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ],
+    { timeout: 120000, maxBuffer: 10 * 1024 * 1024 }
+  );
+
+  // Cleanup temp files
+  rmSync(tempVideo, { force: true });
+  rmSync(tempAudio, { force: true });
+
+  if (!existsSync(outputPath)) {
+    throw new Error("ffmpeg merge finished but output not found");
+  }
+  console.log(
+    `[video][ytdl-core] ✅ merged: ${formatBytes(statSync(outputPath).size)}`
+  );
 }
 
 /**

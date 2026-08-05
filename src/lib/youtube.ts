@@ -101,37 +101,65 @@ export async function fetchVideoMeta(videoId: string): Promise<{
 }
 
 /**
- * Fetch the transcript for a YouTube video using the youtube-transcript package,
- * with a manual fallback that scrapes the YouTube watch page for caption tracks.
+ * Fetch the transcript for a YouTube video.
+ *
+ * Strategy:
+ *  1. Try the youtube-transcript package with several common languages
+ *     (Indonesian first since the app targets ID users, then English variants).
+ *  2. Fallback: scrape the YouTube watch page directly for caption tracks
+ *     and fetch them via the timedtext API (any language available).
+ *
+ * YouTube only provides transcripts when the video creator has enabled
+ * captions OR YouTube has auto-generated them. Many videos (especially
+ * Indonesian comedy/entertainment) have neither, in which case we throw
+ * a clear, actionable error.
  */
 export async function fetchTranscript(videoId: string): Promise<TranscriptSegment[]> {
-  // Primary: use the youtube-transcript package
-  try {
-    const { YoutubeTranscript } = await import("youtube-transcript");
-    const segments = await YoutubeTranscript.fetchTranscript(videoId, {
-      lang: "en",
-    });
-    if (segments && segments.length > 0) {
-      return segments.map((s) => ({
-        text: (s.text || "").replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/&quot;/g, '"').trim(),
-        start: Number(s.offset ?? s.start ?? 0),
-        duration: Number(s.duration ?? 0),
-      }));
+  const primaryError: string[] = [];
+
+  // 1. Try youtube-transcript package with multiple languages
+  //    Indonesian first (app's primary audience), then English variants.
+  const languages = ["id", "en", "en-US", "en-GB"];
+  for (const lang of languages) {
+    try {
+      const { YoutubeTranscript } = await import("youtube-transcript");
+      const segments = await YoutubeTranscript.fetchTranscript(videoId, { lang });
+      if (segments && segments.length > 0) {
+        return segments.map((s) => ({
+          text: (s.text || "")
+            .replace(/&#39;/g, "'")
+            .replace(/&amp;/g, "&")
+            .replace(/&quot;/g, '"')
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+            .trim(),
+          start: Number(s.offset ?? s.start ?? 0),
+          duration: Number(s.duration ?? 0),
+        }));
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      primaryError.push(`${lang}: ${msg.split("\n")[0]}`);
+      // continue to next language
     }
-  } catch (err) {
-    console.warn("[transcript] primary fetch failed, trying fallback:", err instanceof Error ? err.message : err);
   }
 
-  // Fallback: scrape YouTube watch page for caption tracks
+  // 2. Fallback: scrape YouTube watch page for caption tracks (any language)
   try {
     const segments = await fetchTranscriptFromPage(videoId);
     if (segments.length > 0) return segments;
   } catch (err) {
-    console.warn("[transcript] fallback fetch failed:", err instanceof Error ? err.message : err);
+    const msg = err instanceof Error ? err.message : String(err);
+    primaryError.push(`page-scrape: ${msg.split("\n")[0]}`);
   }
 
+  // 3. All attempts failed — throw a clear, actionable error.
   throw new Error(
-    "Could not fetch transcript for this video. The video may not have captions/subtitles enabled, or it may be private/age-restricted."
+    "This video doesn't have captions or a transcript available. " +
+      "YouTube only provides transcripts when the creator has enabled subtitles " +
+      "or auto-captions exist. Try a different video — most podcasts, interviews, " +
+      "educational content, and talks have transcripts. (Details: " +
+      primaryError.join("; ") + ")"
   );
 }
 

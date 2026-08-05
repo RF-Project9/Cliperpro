@@ -103,11 +103,10 @@ export async function fetchVideoMeta(videoId: string): Promise<{
 /**
  * Fetch the transcript for a YouTube video.
  *
- * Strategy:
- *  1. Try the youtube-transcript package with several common languages
- *     (Indonesian first since the app targets ID users, then English variants).
- *  2. Fallback: scrape the YouTube watch page directly for caption tracks
- *     and fetch them via the timedtext API (any language available).
+ * Strategy (tries multiple methods since YouTube blocks cloud IPs):
+ *  1. youtubei.js (Innertube API) WITH cookies — best at bypassing rate limits
+ *  2. youtube-transcript package with multiple languages
+ *  3. Scrape YouTube watch page for caption tracks
  *
  * YouTube only provides transcripts when the video creator has enabled
  * captions OR YouTube has auto-generated them. Many videos (especially
@@ -117,14 +116,35 @@ export async function fetchVideoMeta(videoId: string): Promise<{
 export async function fetchTranscript(videoId: string): Promise<TranscriptSegment[]> {
   const primaryError: string[] = [];
 
-  // 1. Try youtube-transcript package with multiple languages
-  //    Indonesian first (app's primary audience), then English variants.
+  // 0. Load YouTube cookies (same as video download)
+  const cookiesFile = await loadCookiesForTranscript();
+  const hasCookies = cookiesFile !== null;
+  console.log(`[transcript] fetching for ${videoId} (cookies: ${hasCookies ? "YES" : "NO"})`);
+
+  // 1. Try youtubei.js WITH cookies (Innertube API — most reliable on cloud)
+  if (hasCookies) {
+    try {
+      const segments = await fetchTranscriptWithYoutubei(videoId, cookiesFile!);
+      if (segments.length > 0) {
+        console.log(`[transcript] ✅ youtubei.js + cookies: ${segments.length} segments`);
+        return segments;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      primaryError.push(`youtubei+cookies: ${msg.split("\n")[0]}`);
+      console.warn(`[transcript] youtubei.js + cookies failed:`, msg.slice(0, 200));
+    }
+  }
+
+  // 2. Try youtube-transcript package with multiple languages
+  //    (Indonesian first since the app targets ID users, then English variants)
   const languages = ["id", "en", "en-US", "en-GB"];
   for (const lang of languages) {
     try {
       const { YoutubeTranscript } = await import("youtube-transcript");
       const segments = await YoutubeTranscript.fetchTranscript(videoId, { lang });
       if (segments && segments.length > 0) {
+        console.log(`[transcript] ✅ youtube-transcript (${lang}): ${segments.length} segments`);
         return segments.map((s) => ({
           text: (s.text || "")
             .replace(/&#39;/g, "'")
@@ -144,33 +164,173 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptSegmen
     }
   }
 
-  // 2. Fallback: scrape YouTube watch page for caption tracks (any language)
+  // 3. Fallback: scrape YouTube watch page with cookies for caption tracks
   try {
-    const segments = await fetchTranscriptFromPage(videoId);
-    if (segments.length > 0) return segments;
+    const segments = await fetchTranscriptFromPage(videoId, cookiesFile);
+    if (segments.length > 0) {
+      console.log(`[transcript] ✅ page-scrape: ${segments.length} segments`);
+      return segments;
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     primaryError.push(`page-scrape: ${msg.split("\n")[0]}`);
   }
 
-  // 3. All attempts failed — throw a clear, actionable error.
+  // 4. All attempts failed — throw a clear, actionable error.
+  let hint = "";
+  if (!hasCookies) {
+    hint =
+      " SOLUTION: Set YOUTUBE_COOKIES env var on Railway (see .env.example). " +
+      "YouTube is rate-limiting this server's IP — cookies bypass this.";
+  }
   throw new Error(
     "This video doesn't have captions or a transcript available. " +
       "YouTube only provides transcripts when the creator has enabled subtitles " +
-      "or auto-captions exist. Try a different video — most podcasts, interviews, " +
-      "educational content, and talks have transcripts. (Details: " +
-      primaryError.join("; ") + ")"
+      "or auto-captions exist, OR YouTube is rate-limiting this server's IP." +
+      hint +
+      " (Details: " +
+      primaryError.join("; ") +
+      ")"
   );
 }
 
-async function fetchTranscriptFromPage(videoId: string): Promise<TranscriptSegment[]> {
+/**
+ * Load YouTube cookies from YOUTUBE_COOKIES env var (shared with video-processor).
+ * Returns the cookies.txt file path, or null if not set.
+ */
+let transcriptCookiesFile: string | null = null;
+let transcriptCookiesLoaded = false;
+
+async function loadCookiesForTranscript(): Promise<string | null> {
+  if (transcriptCookiesLoaded) return transcriptCookiesFile;
+  transcriptCookiesLoaded = true;
+
+  const encoded = process.env.YOUTUBE_COOKIES;
+  if (!encoded || encoded.trim() === "") {
+    return null;
+  }
+
+  try {
+    const { writeFile, mkdir } = await import("node:fs/promises");
+    const { existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+
+    const decoded = Buffer.from(encoded, "base64").toString("utf-8");
+    if (!decoded.includes(".youtube.com")) {
+      console.warn("[transcript] YOUTUBE_COOKIES doesn't look like Netscape cookies.txt");
+      return null;
+    }
+
+    const cacheDir = join(tmpdir(), "viralclip-videos", "downloads");
+    if (!existsSync(cacheDir)) await mkdir(cacheDir, { recursive: true });
+    const cookiesPath = join(cacheDir, "youtube-cookies.txt");
+    await writeFile(cookiesPath, decoded, "utf-8");
+    transcriptCookiesFile = cookiesPath;
+    console.log(`[transcript] loaded YouTube cookies: ${cookiesPath}`);
+    return cookiesPath;
+  } catch (err) {
+    console.warn(
+      "[transcript] failed to decode YOUTUBE_COOKIES:",
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
+}
+
+/**
+ * Fetch transcript using youtubei.js (Innertube API) with cookies.
+ * This uses YouTube's internal API which is more resilient to rate limiting
+ * and supports cookie-based authentication.
+ */
+async function fetchTranscriptWithYoutubei(
+  videoId: string,
+  cookiesFile: string
+): Promise<TranscriptSegment[]> {
+  const { readFile } = await import("node:fs/promises");
+  const Innertube = (await import("youtubei.js")).default;
+
+  const cookiesContent = await readFile(cookiesFile, "utf-8");
+  const cookieHeader = netscapeToCookieHeader(cookiesContent);
+  if (!cookieHeader) {
+    throw new Error("No valid cookies found in cookies file");
+  }
+
+  const youtube = await Innertube.create({ cookie: cookieHeader });
+  console.log(`[transcript][youtubei] fetching transcript for ${videoId}...`);
+
+  // youtubei.js has a getTranscript() method that returns timed text
+  const transcript = await youtube.getTranscript(videoId);
+  if (!transcript || !transcript.content) {
+    throw new Error("youtubei.js returned empty transcript");
+  }
+
+  // transcript.content is an array of { text, startMs, durationMs }
+  const segments: TranscriptSegment[] = transcript.content
+    .filter((line: any) => line.text)
+    .map((line: any) => ({
+      text: String(line.text).trim(),
+      start: Number(line.startMs ?? 0) / 1000, // ms → seconds
+      duration: Number(line.durationMs ?? 0) / 1000,
+    }));
+
+  if (segments.length === 0) {
+    throw new Error("youtubei.js transcript has no content");
+  }
+
+  return segments;
+}
+
+/**
+ * Convert Netscape cookies.txt format to HTTP Cookie header string.
+ */
+function netscapeToCookieHeader(content: string): string {
+  const pairs: string[] = [];
+  const lines = content.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const parts = trimmed.split("\t");
+    if (parts.length >= 7) {
+      const name = parts[5];
+      const value = parts[6];
+      if (name && value) {
+        pairs.push(`${name}=${value}`);
+      }
+    }
+  }
+  return pairs.join("; ");
+}
+
+async function fetchTranscriptFromPage(
+  videoId: string,
+  cookiesFile: string | null = null
+): Promise<TranscriptSegment[]> {
   const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+  // Build headers — include Cookie header if cookies file is available
+  const headers: Record<string, string> = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+  };
+
+  if (cookiesFile) {
+    try {
+      const { readFile } = await import("node:fs/promises");
+      const cookiesContent = await readFile(cookiesFile, "utf-8");
+      const cookieHeader = netscapeToCookieHeader(cookiesContent);
+      if (cookieHeader) {
+        headers["Cookie"] = cookieHeader;
+        console.log(`[transcript][page-scrape] using cookies`);
+      }
+    } catch {
+      // ignore cookie load errors
+    }
+  }
+
   const res = await fetch(watchUrl, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
+    headers,
     signal: AbortSignal.timeout(12000),
   });
   if (!res.ok) {

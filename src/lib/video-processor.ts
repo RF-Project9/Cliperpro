@@ -40,7 +40,13 @@ function ensureDirs() {
 }
 
 /**
- * Download a YouTube video using yt-dlp.
+ * Download a YouTube video.
+ *
+ * Strategy (tries multiple methods since YouTube blocks cloud IPs):
+ *   1. youtubei.js (Innertube API) — pure JS, best at bypassing bot detection
+ *   2. yt-dlp with iOS client — iOS client often less blocked than android/web
+ *   3. yt-dlp with default settings — last resort
+ *
  * Caches by videoId so we don't re-download for each clip of the same video.
  */
 export async function downloadVideo(
@@ -48,7 +54,6 @@ export async function downloadVideo(
 ): Promise<{ path: string; duration: number }> {
   ensureDirs();
   const outputPath = join(DOWNLOAD_CACHE_DIR, `${youtubeId}.mp4`);
-  const tempOutput = join(DOWNLOAD_CACHE_DIR, `${youtubeId}.part`);
 
   // Cache hit?
   if (existsSync(outputPath)) {
@@ -57,18 +62,194 @@ export async function downloadVideo(
     return { path: outputPath, duration };
   }
 
-  const url = `https://www.youtube.com/watch?v=${youtubeId}`;
-  console.log(`[video] downloading ${url} with yt-dlp...`);
+  console.log(`[video] downloading ${youtubeId}...`);
 
-  // yt-dlp options:
-  //  -f bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best
-  //    → prefer 720p mp4
-  //  --merge-output-format mp4
-  //  -o <path>
-  //  --no-playlist
-  //  --no-warnings
-  //  --no-check-certificates  (avoid SSL issues on some Railway regions)
-  //  --extractor-args "youtube:player_client=android"  (bypass some blocks)
+  // Try each download method in sequence
+  const methods = [
+    () => downloadWithYoutubei(youtubeId, outputPath),
+    () => downloadWithYtDlp(youtubeId, outputPath, "ios,android,web"),
+    () => downloadWithYtDlp(youtubeId, outputPath, "ios"),
+    () => downloadWithYtDlp(youtubeId, outputPath, "tv,web_safari"),
+    () => downloadWithYtDlp(youtubeId, outputPath, "default"),
+  ];
+
+  let lastError = "";
+  for (let i = 0; i < methods.length; i++) {
+    try {
+      console.log(`[video] trying download method ${i + 1}/${methods.length}...`);
+      await methods[i]();
+
+      if (existsSync(outputPath)) {
+        const duration = await getVideoDuration(outputPath);
+        const size = statSync(outputPath).size;
+        if (size > 10000) {
+          // sanity check — file should be > 10KB
+          console.log(
+            `[video] SUCCESS with method ${i + 1}: ${youtubeId} downloaded, ${duration}s, ${formatBytes(size)}`
+          );
+          return { path: outputPath, duration };
+        } else {
+          console.warn(`[video] method ${i + 1} produced tiny file (${size}B), trying next`);
+          rmSync(outputPath, { force: true });
+        }
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      console.warn(`[video] method ${i + 1} failed:`, lastError.slice(0, 300));
+    }
+  }
+
+  throw new Error(
+    `All download methods failed for ${youtubeId}. ` +
+      `YouTube is blocking this server's IP (cloud servers often get flagged as bots). ` +
+      `Last error: ${lastError.slice(0, 400)}. ` +
+      `Try again later, or use a different video.`
+  );
+}
+
+/**
+ * Download using youtubei.js (Innertube API) — best at bypassing bot detection.
+ * Gets streaming URLs via YouTube's internal API, then downloads video+audio
+ * and merges them with ffmpeg.
+ */
+async function downloadWithYoutubei(
+  youtubeId: string,
+  outputPath: string
+): Promise<void> {
+  const Innertube = (await import("youtubei.js")).default;
+  const youtube = await Innertube.create();
+  console.log(`[video][youtubei] fetching video info for ${youtubeId}...`);
+
+  const info = await youtube.getInfo(youtubeId);
+  console.log(`[video][youtubei] got info, title: "${info.basic_info.title}"`);
+
+  // Get streaming data — choose best 720p video + best audio
+  const streamingData = info.streaming_data;
+  if (!streamingData) {
+    throw new Error("No streaming data available (video may be private/DRM)");
+  }
+
+  // Find best video-only stream ≤720p (mp4 preferred)
+  const videoFormats = streamingData.adaptive_formats.filter(
+    (f: any) => f.has_video && f.mime_type?.includes("video/mp4")
+  );
+  const audioFormats = streamingData.adaptive_formats.filter(
+    (f: any) => f.has_audio && f.mime_type?.includes("audio/mp4")
+  );
+
+  if (videoFormats.length === 0) {
+    throw new Error("No MP4 video streams found");
+  }
+
+  // Pick best video ≤720p (highest bitrate)
+  const videoStream = videoFormats
+    .filter((f: any) => (f.height || 0) <= 720)
+    .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+
+  if (!videoStream) {
+    throw new Error("No video stream ≤720p available");
+  }
+
+  // Pick best audio (highest bitrate)
+  const audioStream = audioFormats
+    .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+
+  if (!audioStream) {
+    throw new Error("No audio stream available");
+  }
+
+  console.log(
+    `[video][youtubei] video: ${videoStream.height}p, audio: ${audioStream.bitrate}bps`
+  );
+
+  // Download video stream to temp file
+  const tempVideo = join(DOWNLOAD_CACHE_DIR, `${youtubeId}.video.mp4`);
+  const tempAudio = join(DOWNLOAD_CACHE_DIR, `${youtubeId}.audio.mp4`);
+
+  console.log(`[video][youtubei] downloading video stream...`);
+  await streamToFile(videoStream, tempVideo);
+
+  console.log(`[video][youtubei] downloading audio stream...`);
+  await streamToFile(audioStream, tempAudio);
+
+  // Merge with ffmpeg
+  console.log(`[video][youtubei] merging video+audio with ffmpeg...`);
+  await execFileAsync(
+    "ffmpeg",
+    [
+      "-y",
+      "-i",
+      tempVideo,
+      "-i",
+      tempAudio,
+      "-c:v",
+      "copy",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ],
+    { timeout: 120000, maxBuffer: 10 * 1024 * 1024 }
+  );
+
+  // Cleanup temp files
+  rmSync(tempVideo, { force: true });
+  rmSync(tempAudio, { force: true });
+
+  if (!existsSync(outputPath)) {
+    throw new Error("ffmpeg merge finished but output not found");
+  }
+  console.log(`[video][youtubei] merge complete: ${formatBytes(statSync(outputPath).size)}`);
+}
+
+/**
+ * Save a youtubei.js stream (ReadableStream or similar) to a file.
+ */
+async function streamToFile(stream: any, filePath: string): Promise<void> {
+  const { createWriteStream } = await import("node:fs");
+  return new Promise((resolve, reject) => {
+    const writer = createWriteStream(filePath);
+    // youtubei.js streams are typically Node streams or Web ReadableStreams
+    if (stream.pipe) {
+      // Node.js readable stream
+      stream.pipe(writer);
+      writer.on("finish", resolve);
+      writer.on("error", reject);
+    } else if (typeof stream.getReader === "function") {
+      // Web ReadableStream — convert to Node stream
+      const { Readable } = require("node:stream");
+      const nodeStream = Readable.fromWeb(stream);
+      nodeStream.pipe(writer);
+      writer.on("finish", resolve);
+      writer.on("error", reject);
+    } else {
+      // Try to treat as async iterable
+      (async () => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of stream) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        await writeFile(filePath, Buffer.concat(chunks));
+        resolve();
+      })().catch(reject);
+    }
+  });
+}
+
+/**
+ * Download using yt-dlp with a specific player client.
+ */
+async function downloadWithYtDlp(
+  youtubeId: string,
+  outputPath: string,
+  playerClient: string
+): Promise<void> {
+  const url = `https://www.youtube.com/watch?v=${youtubeId}`;
+  const tempOutput = join(DOWNLOAD_CACHE_DIR, `${youtubeId}.part`);
+
   const ytDlpArgs = [
     url,
     "-f",
@@ -79,28 +260,25 @@ export async function downloadVideo(
     "--no-warnings",
     "--no-check-certificates",
     "--extractor-args",
-    "youtube:player_client=android,web",
+    `youtube:player_client=${playerClient}`,
     "-o",
     tempOutput,
   ];
 
+  console.log(`[video][yt-dlp] client=${playerClient}`);
   try {
     const { stdout, stderr } = await execFileAsync("yt-dlp", ytDlpArgs, {
-      timeout: 300000, // 5 min download timeout
+      timeout: 300000,
       maxBuffer: 10 * 1024 * 1024,
     });
-    console.log(`[video] yt-dlp stdout:`, stdout.slice(0, 500));
-    console.log(`[video] yt-dlp stderr:`, stderr.slice(0, 500));
+    console.log(`[video][yt-dlp] stdout:`, stdout.slice(0, 300));
+    console.log(`[video][yt-dlp] stderr:`, stderr.slice(0, 300));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[video] yt-dlp FAILED:`, message.slice(0, 1000));
-    throw new Error(
-      `Failed to download video with yt-dlp. YouTube may be blocking this server's IP, ` +
-        `or the video is private/age-restricted. Details: ${message.slice(0, 400)}`
-    );
+    throw new Error(`yt-dlp (${playerClient}) failed: ${message.slice(0, 500)}`);
   }
 
-  // yt-dlp might output to tempOutput or tempOutput.mp4 — find it
+  // Find the output file (yt-dlp might output to different paths)
   const possibleOutputs = [tempOutput, `${tempOutput}.mp4`, outputPath];
   let foundPath = "";
   for (const p of possibleOutputs) {
@@ -111,29 +289,13 @@ export async function downloadVideo(
   }
 
   if (!foundPath) {
-    // List what's actually in the cache dir to debug
-    const { readdirSync } = await import("node:fs");
-    const files = readdirSync(DOWNLOAD_CACHE_DIR);
-    console.error(
-      `[video] yt-dlp output not found. Files in cache dir:`,
-      files
-    );
-    throw new Error(
-      "yt-dlp finished but output file not found. Check yt-dlp version and YouTube access."
-    );
+    throw new Error("yt-dlp finished but output file not found");
   }
 
   // Rename to final output path
   if (foundPath !== outputPath) {
     renameSync(foundPath, outputPath);
   }
-
-  const duration = await getVideoDuration(outputPath);
-  const size = statSync(outputPath).size;
-  console.log(
-    `[video] downloaded ${youtubeId}: ${duration}s, ${formatBytes(size)}`
-  );
-  return { path: outputPath, duration };
 }
 
 /**

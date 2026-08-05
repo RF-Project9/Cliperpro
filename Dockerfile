@@ -1,6 +1,6 @@
 # Dockerfile for ViralClip AI — Railway deployment
 # Uses Debian-based image which includes libssl3 (required by Prisma's native engine).
-# This eliminates the "libssl.so.3: cannot open shared object file" error.
+# Also installs ffmpeg + yt-dlp for video processing (rendering clips with subtitles).
 
 # ---- Build stage ----
 FROM oven/bun:1-debian AS builder
@@ -29,16 +29,28 @@ ENV NODE_ENV=production
 # to whatever Railway assigns.
 ENV HOSTNAME=0.0.0.0
 
-# Install runtime libraries Prisma needs (libssl3 is already in Debian, but be safe)
+# Install runtime libraries:
+#   - openssl, ca-certificates: Prisma needs libssl3 (already in Debian, but be safe)
+#   - ffmpeg: video processing (cut, crop 9:16, burn subtitles)
+#   - yt-dlp: download YouTube videos for clip rendering
+#   - python3, pip: yt-dlp is a Python tool
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends openssl ca-certificates && \
+    apt-get install -y --no-install-recommends \
+      openssl \
+      ca-certificates \
+      ffmpeg \
+      python3 \
+      python3-pip \
+      && \
+    pip3 install --no-cache-dir --break-system-packages yt-dlp && \
     rm -rf /var/lib/apt/lists/*
+
+# Verify yt-dlp and ffmpeg are available
+RUN yt-dlp --version && ffmpeg -version | head -1
 
 # Copy standalone Next.js build.
 # IMPORTANT: preserve the .next/standalone/ path because package.json's
 # start:prod script runs `bun .next/standalone/server.js`.
-# The standalone output is self-contained: server.js + traced node_modules
-# + .next/static + public + package.json.
 COPY --from=builder /app/.next/standalone ./.next/standalone
 
 # Copy the FULL builder node_modules so `bun run db:deploy` (prisma CLI) works.

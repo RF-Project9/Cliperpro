@@ -37,6 +37,22 @@ export async function deleteVideo(id: string): Promise<void> {
   if (!res.ok) throw new Error(data?.error || "Failed to delete video.");
 }
 
+export async function renderClip(clipId: string): Promise<{
+  success: boolean;
+  downloadUrl: string;
+  fileSize: number;
+  clip: ClipItem;
+}> {
+  const res = await fetch(`/api/clips/${clipId}/render`, { method: "POST" });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || "Failed to render clip.");
+  return data;
+}
+
+export function getDownloadUrl(clipId: string): string {
+  return `/api/clips/${clipId}/download`;
+}
+
 export interface SettingsResponse {
   hasApiKey: boolean;
   apiKeyMasked: string | null;

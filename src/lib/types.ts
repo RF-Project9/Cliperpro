@@ -2,7 +2,11 @@
 
 export type VideoStatus = "pending" | "processing" | "completed" | "failed";
 
-export type ClipStatus = "generated" | "downloading" | "downloaded" | "failed";
+export type ClipStatus =
+  | "generated"
+  | "downloading"
+  | "downloaded"
+  | "failed";
 
 export interface VideoItem {
   id: string;

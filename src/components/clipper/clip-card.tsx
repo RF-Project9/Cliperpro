@@ -1,6 +1,16 @@
 "use client";
 
-import { Play, Clock, Hash, Copy, Check, Flame } from "lucide-react";
+import {
+  Play,
+  Clock,
+  Hash,
+  Copy,
+  Check,
+  Flame,
+  Download,
+  Loader2,
+  Film,
+} from "lucide-react";
 import { useState } from "react";
 import Image from "next/image";
 import { Badge } from "@/components/ui/badge";
@@ -10,6 +20,7 @@ import { toast } from "sonner";
 import { ClipItem, VideoItem } from "@/lib/types";
 import { formatDuration, formatTimestamp } from "@/lib/youtube";
 import { useClipperStore } from "@/lib/store";
+import { renderClip, getDownloadUrl } from "@/lib/api";
 
 interface Props {
   clip: ClipItem;
@@ -18,10 +29,10 @@ interface Props {
 
 export function ClipCard({ clip, video }: Props) {
   const [copied, setCopied] = useState<"title" | "tags" | null>(null);
+  const [isRendering, setIsRendering] = useState(false);
+  const [clipStatus, setClipStatus] = useState<ClipItem["status"]>(clip.status);
   const selectVideo = useClipperStore((s) => s.selectVideo);
 
-  // Use the video's start time to construct a YouTube thumbnail-ish preview.
-  // We use the video thumbnail with an overlay showing the timestamp range.
   const thumb = video.thumbnail;
   const scoreColor = getScoreColor(clip.score);
 
@@ -50,6 +61,26 @@ export function ClipCard({ clip, video }: Props) {
 
   function openPreview() {
     selectVideo(video, [clip]);
+  }
+
+  async function handleRender() {
+    setIsRendering(true);
+    setClipStatus("downloading");
+    toast.info("Rendering clip... downloading video & processing with ffmpeg");
+    try {
+      const result = await renderClip(clip.id);
+      setClipStatus("downloaded");
+      toast.success(`Clip ready! (${formatBytes(result.fileSize)})`);
+    } catch (err) {
+      setClipStatus("failed");
+      toast.error(err instanceof Error ? err.message : "Render failed");
+    } finally {
+      setIsRendering(false);
+    }
+  }
+
+  function handleDownload() {
+    window.open(getDownloadUrl(clip.id), "_blank");
   }
 
   return (
@@ -85,6 +116,20 @@ export function ClipCard({ clip, video }: Props) {
           {formatDuration(clip.duration)}
         </div>
 
+        {/* Status badge - show if rendering/downloaded */}
+        {clipStatus === "downloading" && (
+          <div className="absolute right-3 bottom-3 flex items-center gap-1.5 rounded-full bg-violet-500/80 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-md">
+            <Loader2 className="size-3 animate-spin" />
+            Rendering...
+          </div>
+        )}
+        {clipStatus === "downloaded" && (
+          <div className="absolute right-3 bottom-3 flex items-center gap-1.5 rounded-full bg-emerald-500/80 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-md">
+            <Check className="size-3" />
+            Ready
+          </div>
+        )}
+
         {/* Play overlay */}
         <div className="absolute inset-0 flex items-center justify-center opacity-0 transition-opacity group-hover:opacity-100">
           <div className="flex size-14 items-center justify-center rounded-full bg-white/90 text-black shadow-xl">
@@ -107,7 +152,7 @@ export function ClipCard({ clip, video }: Props) {
 
         {clip.hook && (
           <p className="line-clamp-2 text-xs italic text-muted-foreground">
-            “{clip.hook}”
+            &ldquo;{clip.hook}&rdquo;
           </p>
         )}
 
@@ -129,7 +174,8 @@ export function ClipCard({ clip, video }: Props) {
           </div>
         )}
 
-        <div className="flex items-center gap-2 pt-1">
+        {/* Primary actions: Preview + Render/Download */}
+        <div className="flex items-center gap-2">
           <Button
             size="sm"
             variant="default"
@@ -139,38 +185,89 @@ export function ClipCard({ clip, video }: Props) {
             <Play className="size-3.5 fill-white" />
             Preview
           </Button>
-          <Button
-            size="icon"
-            variant="outline"
-            className="h-8 w-8"
-            onClick={copyTitle}
-            title="Copy title"
-          >
-            {copied === "title" ? (
-              <Check className="size-3.5 text-emerald-400" />
-            ) : (
-              <Copy className="size-3.5" />
-            )}
-          </Button>
-          {clip.hashtags && clip.hashtags.length > 0 && (
+
+          {clipStatus === "downloaded" ? (
             <Button
-              size="icon"
-              variant="outline"
-              className="h-8 w-8"
-              onClick={copyHashtags}
-              title="Copy hashtags"
+              size="sm"
+              variant="default"
+              onClick={handleDownload}
+              className="h-8 flex-1 gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white hover:from-emerald-600 hover:to-teal-600"
             >
-              {copied === "tags" ? (
-                <Check className="size-3.5 text-emerald-400" />
+              <Download className="size-3.5" />
+              Download
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleRender}
+              disabled={isRendering}
+              className="h-8 flex-1 gap-1.5"
+              title="Render this clip into a 9:16 video with subtitles"
+            >
+              {isRendering ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin" />
+                  Rendering...
+                </>
               ) : (
-                <Hash className="size-3.5" />
+                <>
+                  <Film className="size-3.5" />
+                  Render
+                </>
               )}
             </Button>
           )}
         </div>
+
+        {/* Secondary actions: copy buttons */}
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 flex-1 gap-1.5 text-xs text-muted-foreground"
+            onClick={copyTitle}
+          >
+            {copied === "title" ? (
+              <Check className="size-3 text-emerald-400" />
+            ) : (
+              <Copy className="size-3" />
+            )}
+            Title
+          </Button>
+          {clip.hashtags && clip.hashtags.length > 0 && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 flex-1 gap-1.5 text-xs text-muted-foreground"
+              onClick={copyHashtags}
+            >
+              {copied === "tags" ? (
+                <Check className="size-3 text-emerald-400" />
+              ) : (
+                <Hash className="size-3" />
+              )}
+              Tags
+            </Button>
+          )}
+        </div>
+
+        {/* Render info hint */}
+        {clipStatus === "generated" && (
+          <p className="text-[11px] text-muted-foreground">
+            Click <strong>Render</strong> to create a 9:16 video with subtitles
+            (takes 30-90s)
+          </p>
+        )}
       </div>
     </Card>
   );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function getScoreColor(score: number) {

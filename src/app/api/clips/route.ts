@@ -64,10 +64,17 @@ export async function POST(req: NextRequest) {
 
     try {
       // 1. Fetch metadata (title, channel) in parallel with transcript
+      console.log("[POST /api/clips] fetching transcript for", youtubeId);
       const [meta, segments] = await Promise.all([
         fetchVideoMeta(youtubeId),
         fetchTranscript(youtubeId),
       ]);
+      console.log(
+        "[POST /api/clips] transcript OK:",
+        segments.length,
+        "segments, title:",
+        meta.title
+      );
 
       await db.video.update({
         where: { id: video.id },
@@ -80,28 +87,39 @@ export async function POST(req: NextRequest) {
       });
 
       // 2. Detect viral clips with OpenAI
+      console.log("[POST /api/clips] calling OpenAI to detect viral clips...");
       const suggested = await detectViralClips(segments);
+      console.log(
+        "[POST /api/clips] OpenAI returned",
+        suggested.length,
+        "clips"
+      );
 
       // 3. Persist clips
       const last = segments[segments.length - 1];
       const totalDuration = last ? last.start + (last.duration || 0) : null;
 
-      await db.clip.createMany({
-        data: suggested.map((c) => ({
-          videoId: video.id,
-          startTime: c.startTime,
-          endTime: c.endTime,
-          duration: c.endTime - c.startTime,
-          title: c.title,
-          description: c.description,
-          reason: c.reason,
-          score: c.score,
-          hook: c.hook,
-          hashtags: JSON.stringify(c.hashtags),
-          transcript: c.transcript,
-          status: "generated",
-        })),
-      });
+      if (suggested.length > 0) {
+        await db.clip.createMany({
+          data: suggested.map((c) => ({
+            videoId: video.id,
+            startTime: c.startTime,
+            endTime: c.endTime,
+            duration: c.endTime - c.startTime,
+            title: c.title,
+            description: c.description,
+            reason: c.reason,
+            score: c.score,
+            hook: c.hook,
+            hashtags: JSON.stringify(c.hashtags),
+            transcript: c.transcript,
+            status: "generated",
+          })),
+        });
+        console.log("[POST /api/clips] persisted", suggested.length, "clips to DB");
+      } else {
+        console.warn("[POST /api/clips] no clips returned from OpenAI!");
+      }
 
       const updated = await db.video.update({
         where: { id: video.id },

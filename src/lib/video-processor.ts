@@ -822,16 +822,23 @@ export function generateASS(
   clip: ClipItem,
   clipDuration: number
 ): string {
-  if (!clip.transcript) return "";
+  if (!clip.transcript) {
+    console.warn("[ass] NO transcript available for clip");
+    return "";
+  }
+
+  console.log(`[ass] transcript length: ${clip.transcript.length} chars`);
+  console.log(`[ass] transcript preview: ${clip.transcript.slice(0, 200)}`);
+  console.log(`[ass] clip time range: ${clip.startTime}s - ${clip.endTime}s (duration: ${clipDuration}s)`);
 
   // The video transcript is stored as: [seconds] text\n[seconds] text\n...
   // Parse these to get REAL timestamps from YouTube
   const rawLines = clip.transcript.split("\n").map((l) => l.trim()).filter(Boolean);
+  console.log(`[ass] raw lines: ${rawLines.length}`);
 
   let entries: { start: number; end: number; text: string }[] = [];
 
-  // Parse each line for timestamps — handle multiple formats:
-  // [12.5] text  |  [1:23] text  |  [1:23.5] text  |  [0:05] text
+  // Parse each line for timestamps — handle multiple formats
   for (const line of rawLines) {
     let time: number | null = null;
     let text: string | null = null;
@@ -851,23 +858,32 @@ export function generateASS(
     }
 
     if (time !== null && text !== null && text.length > 0) {
-      // Only include lines within the clip's time range
-      if (time >= clip.startTime && time <= clip.endTime) {
+      // Only include lines within the clip's time range (with 5s buffer)
+      if (time >= clip.startTime - 5 && time <= clip.endTime + 5) {
         entries.push({
-          start: time - clip.startTime,
-          end: time - clip.startTime + 3, // default, will be fixed
+          start: Math.max(0, time - clip.startTime),
+          end: Math.max(0, time - clip.startTime) + 3,
           text,
         });
       }
     }
   }
 
+  console.log(`[ass] timestamped entries found: ${entries.length}`);
+
   // If no timestamped entries found, fall back to distributing text evenly
   if (entries.length === 0) {
-    console.warn("[ass] no timestamped entries found, distributing evenly");
-    const perLine = clipDuration / rawLines.length;
-    rawLines.forEach((text, i) => {
-      entries.push({ start: i * perLine, end: (i + 1) * perLine, text });
+    console.warn("[ass] no timestamped entries found, using fallback: distribute all text evenly");
+    // Use all raw lines (even without timestamps) and distribute evenly
+    const cleanLines = rawLines.filter((l) => !l.startsWith("[") || l.includes(" "));
+    const linesToUse = cleanLines.length > 0 ? cleanLines : rawLines;
+    const perLine = clipDuration / linesToUse.length;
+    linesToUse.forEach((text, i) => {
+      // Remove timestamp prefix if present
+      const cleanText = text.replace(/^\[[\d:.]+\]\s*/, "").trim();
+      if (cleanText.length > 0) {
+        entries.push({ start: i * perLine, end: (i + 1) * perLine, text: cleanText });
+      }
     });
   } else {
     // Fix end times: each entry ends when next starts
@@ -879,11 +895,14 @@ export function generateASS(
     }
   }
 
-  if (entries.length === 0) return "";
+  if (entries.length === 0) {
+    console.error("[ass] FAILED: no entries could be generated");
+    return "";
+  }
 
-  console.log(`[ass] generated ${entries.length} subtitle entries`);
+  console.log(`[ass] final entries: ${entries.length}`);
 
-  // Build ASS file — use DejaVu Sans Bold (ALWAYS available on Debian/Ubuntu)
+  // Build ASS file — use DejaVu Sans (ALWAYS available on Debian/Ubuntu)
   const ass = `[Script Info]
 Title: ViralClip AI Subtitles
 ScriptType: v4.00+
@@ -941,7 +960,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   }
 
   const fullAss = ass + dialogueLines.join("\n") + "\n";
-  console.log(`[ass] ASS file size: ${fullAss.length} chars, ${dialogueLines.length} dialogue lines`);
+  console.log(`[ass] ASS file generated: ${fullAss.length} chars, ${dialogueLines.length} dialogue lines`);
   return fullAss;
 }
 

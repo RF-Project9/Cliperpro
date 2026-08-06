@@ -35,10 +35,64 @@ const WORK_DIR = process.env.VIDEO_WORK_DIR || join(tmpdir(), "viralclip-videos"
 const DOWNLOAD_CACHE_DIR = join(WORK_DIR, "downloads");
 const OUTPUT_DIR = join(WORK_DIR, "outputs");
 
-// Ensure directories exist
+// Ensure directories exist and download emoji assets
+let emojiAssetsReady = false;
+
 function ensureDirs() {
   for (const dir of [WORK_DIR, DOWNLOAD_CACHE_DIR, OUTPUT_DIR]) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  }
+}
+
+/**
+ * Download emoji PNG images for video overlay (fire 🔥 and mind-blown 🤯).
+ * Uses open-source emoji images from the Twemoji project (Twitter/X emoji).
+ * Downloads once and caches in WORK_DIR.
+ */
+async function ensureEmojiAssets() {
+  if (emojiAssetsReady) return;
+  const firePath = join(WORK_DIR, "emoji-fire.png");
+  const wowPath = join(WORK_DIR, "emoji-wow.png");
+
+  // Skip if already downloaded
+  if (existsSync(firePath) && existsSync(wowPath)) {
+    emojiAssetsReady = true;
+    return;
+  }
+
+  try {
+    // Download from Joypixels/open-source emoji CDN (256x256 PNG)
+    const fireUrl = "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f525.png";
+    const wowUrl = "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f92f.png";
+
+    console.log("[emoji] downloading emoji assets...");
+
+    // Download fire emoji
+    if (!existsSync(firePath)) {
+      const fireRes = await fetch(fireUrl);
+      if (fireRes.ok) {
+        const buf = Buffer.from(await fireRes.arrayBuffer());
+        await writeFile(firePath, buf);
+        console.log("[emoji] ✅ fire emoji downloaded");
+      }
+    }
+
+    // Download mind-blown emoji
+    if (!existsSync(wowPath)) {
+      const wowRes = await fetch(wowUrl);
+      if (wowRes.ok) {
+        const buf = Buffer.from(await wowRes.arrayBuffer());
+        await writeFile(wowPath, buf);
+        console.log("[emoji] ✅ mind-blown emoji downloaded");
+      }
+    }
+
+    emojiAssetsReady = true;
+    console.log("[emoji] assets ready");
+  } catch (err) {
+    console.warn("[emoji] failed to download emoji assets:", err instanceof Error ? err.message : err);
+    // Non-fatal: emoji overlay will be skipped
+    emojiAssetsReady = true;
   }
 }
 
@@ -1146,6 +1200,7 @@ export async function processClip(
   clip: ClipItem
 ): Promise<string> {
   ensureDirs();
+  await ensureEmojiAssets(); // Download emoji PNGs if not cached
   const outputPath = join(OUTPUT_DIR, `${clip.id}.mp4`);
   const assPath = join(OUTPUT_DIR, `${clip.id}.ass`);
 
@@ -1261,7 +1316,7 @@ export async function processClip(
   );
 
   // Intro card: first 2.5 seconds
-  // Background box + title text + "VIRAL CLIP" branding
+  // Background box + title text + "KLIP VIRAL" branding
   const escapedTitle = clip.title.replace(/'/g, "\\'").replace(/:/g, "\\:").slice(0, 40);
   filters.push(
     // Background box (purple gradient feel)
@@ -1269,8 +1324,8 @@ export async function processClip(
     `drawbox=x=80:y=350:w=920:h=200:color=white@0.3:t=fill:enable='lt(t,2.5)'`,
     // Title text
     `drawtext=fontfile=${fontBold}:text='${escapedTitle}':fontcolor=white:fontsize=36:x=(w-tw)/2:y=400:enable='lt(t,2.5)'`,
-    // "VIRAL CLIP" branding
-    `drawtext=fontfile=${fontBold}:text='VIRAL CLIP':fontcolor=0xFFD700:fontsize=28:x=(w-tw)/2:y=480:enable='lt(t,2.5)'`
+    // "KLIP VIRAL" branding
+    `drawtext=fontfile=${fontBold}:text='KLIP VIRAL':fontcolor=0xFFD700:fontsize=28:x=(w-tw)/2:y=480:enable='lt(t,2.5)'`
   );
 
   // Outro card: last 2.5 seconds
@@ -1280,24 +1335,11 @@ export async function processClip(
     // Background box
     `drawbox=x=80:y=750:w=920:h=300:color=black@0.8:t=fill:enable='gt(t,${outroStart})'`,
     `drawbox=x=80:y=750:w=920:h=300:color=0x6D28D9@0.5:t=fill:enable='gt(t,${outroStart})'`,
-    // "Follow for more!" text
-    `drawtext=fontfile=${fontBold}:text='Follow for more!':fontcolor=white:fontsize=44:x=(w-tw)/2:y=820:enable='gt(t,${outroStart})'`,
+    // "Follow untuk lebih banyak!" text
+    `drawtext=fontfile=${fontBold}:text='Follow untuk lebih banyak!':fontcolor=white:fontsize=44:x=(w-tw)/2:y=820:enable='gt(t,${outroStart})'`,
     // Hashtag
     `drawtext=fontfile=${fontRegular}:text='#${topHashtag}':fontcolor=0xFFD700:fontsize=32:x=(w-tw)/2:y=900:enable='gt(t,${outroStart})'`
   );
-
-  // Emoji overlay on climax clips (score >= 75)
-  // Show emoji at 30% and 70% of clip duration for 1 second each
-  if (clip.score >= 75) {
-    const emoji1Time = clipDuration * 0.3;
-    const emoji2Time = clipDuration * 0.7;
-    // Use Noto Color Emoji font if available, else skip emoji
-    const emojiFont = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf";
-    filters.push(
-      `drawtext=fontfile=${fontBold}:text='FIRE':fontcolor=0xFF4500:fontsize=120:x=(w-tw)/2:y=200:enable='between(t,${emoji1Time},${emoji1Time + 1})':alpha='if(lt(t,${emoji1Time + 0.5}),1,1-(t-${emoji1Time + 0.5})/0.5)'`,
-      `drawtext=fontfile=${fontBold}:text='WOW':fontcolor=0xFFD700:fontsize=120:x=(w-tw)/2:y=200:enable='between(t,${emoji2Time},${emoji2Time + 1})':alpha='if(lt(t,${emoji2Time + 0.5}),1,1-(t-${emoji2Time + 0.5})/0.5)'`
-    );
-  }
 
   if (assContent) {
     // ASS subtitles support karaoke (\k tags) for word-by-word highlighting
@@ -1305,7 +1347,29 @@ export async function processClip(
     filters.push(`subtitles='${escapedAss}'`);
   }
 
-  const filterComplex = filters.join(",");
+  // Emoji overlay on climax clips (score >= 75)
+  // Use pre-downloaded emoji PNG images as additional ffmpeg inputs
+  const emojiInputs: string[] = [];
+  let filterComplex = filters.join(",");
+
+  if (clip.score >= 75) {
+    const emoji1Time = clipDuration * 0.3;
+    const emoji2Time = clipDuration * 0.7;
+    const fireEmojiPath = join(WORK_DIR, "emoji-fire.png");
+    const wowEmojiPath = join(WORK_DIR, "emoji-wow.png");
+
+    if (existsSync(fireEmojiPath)) {
+      emojiInputs.push("-i", fireEmojiPath);
+      // Scale emoji to 150x150 and overlay
+      filterComplex += `;[1:v]scale=150:150[emoji1];[0:v][emoji1]overlay=(W-w)/2:H/2-h-150:enable='between(t,${emoji1Time},${emoji1Time + 1})':format=auto,format=yuv420p[vid1]`;
+    }
+    if (existsSync(wowEmojiPath)) {
+      emojiInputs.push("-i", wowEmojiPath);
+      const inputIdx = existsSync(fireEmojiPath) ? 2 : 1;
+      const baseLabel = existsSync(fireEmojiPath) ? "vid1" : "0:v";
+      filterComplex += `;[${inputIdx}:v]scale=150:150[emoji2];[${baseLabel}][emoji2]overlay=(W-w)/2:H/2-h-150:enable='between(t,${emoji2Time},${emoji2Time + 1})':format=auto,format=yuv420p`;
+    }
+  }
 
   const ffmpegArgs = [
     "-y", // overwrite output
@@ -1315,7 +1379,8 @@ export async function processClip(
     String(clip.endTime),
     "-i",
     sourceVideoPath,
-    "-vf",
+    ...emojiInputs, // additional emoji image inputs
+    "-filter_complex",
     filterComplex,
     "-c:v",
     "libx264",

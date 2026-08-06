@@ -139,10 +139,11 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptSegmen
   }
 
   // 2. Try youtube-transcript package with multiple languages
-  //    Note: English first is safer — Indonesian auto-captions on YouTube are
-  //    often inaccurate. English captions (including auto-generated) are
-  //    typically much more reliable, even for Indonesian videos.
-  const languages = ["en", "en-US", "en-GB", "id"];
+  //    Prioritize Indonesian (id) first since the app targets ID users.
+  //    We also try manual captions (kind="asr" are auto-generated, which we
+  //    try to avoid by requesting language codes without "-auto" suffix).
+  //    Indonesian first for ID-language videos, then English as universal fallback.
+  const languages = ["id", "en", "en-US", "en-GB"];
   for (const lang of languages) {
     try {
       const { YoutubeTranscript } = await import("youtube-transcript");

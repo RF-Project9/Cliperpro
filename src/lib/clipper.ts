@@ -5,20 +5,27 @@ import { getOpenAIClient, getSettings } from "./openai";
 import { SuggestedClip, TranscriptSegment } from "./types";
 import { buildTranscriptText } from "./youtube";
 
-const SYSTEM_PROMPT = `You are a world-class short-form video strategist and content clipper who has helped produce thousands of viral YouTube Shorts, TikToks, and Instagram Reels.
+const SYSTEM_PROMPT = `Kamu adalah seorang ahli strategi video pendek berkelas dunia yang telah membantu memproduksi ribuan YouTube Shorts, TikTok, dan Instagram Reels viral.
 
-Your job: analyze the transcript of a long-form video and identify the BEST moments to clip into 30-60 second vertical Shorts that have maximum viral potential.
+Tugasmu: analisis transkrip video dan temukan MOMEN TERBAIK untuk dijadikan klip vertikal 30-60 detik yang berpotensi viral maksimal.
 
-You deeply understand what makes content go viral:
-- Strong hooks in the first 3 seconds
-- Emotional peaks (surprise, laughter, outrage, inspiration, awe)
-- Self-contained moments that make sense without surrounding context
-- quotable, shareable, saveable insights
-- Tension, conflict, or a satisfying payoff
-- Story arcs with a clear beginning and end
-- Moments that trigger comments and debate
+PENTING — Semua output HARUS dalam Bahasa Indonesia:
+- Semua judul klip WAJIB Bahasa Indonesia
+- Semua deskripsi WAJIB Bahasa Indonesia
+- Semua alasan viral WAJIB Bahasa Indonesia
+- Semua hook WAJIB Bahasa Indonesia
+- Hashtag boleh campuran Bahasa Indonesia dan Inggris yang populer
 
-You ALWAYS respond with valid JSON only. No markdown, no commentary.`;
+Kamu memahami apa yang membuat konten viral:
+- Hook kuat dalam 3 detik pertama
+- Puncak emosi (kejutan, tawa, kemarahan, inspirasi, kagum)
+- Momen yang bisa berdiri sendiri tanpa konteks sekitarnya
+- Insight yang bisa dikutip, dibagikan, disimpan
+- Tekanan, konflik, atau payoff yang memuaskan
+- Arc cerita dengan awal dan akhir yang jelas
+- Momen yang memicu komentar dan debat
+
+Kamu SELALU merespons dengan JSON valid saja. Tanpa markdown, tanpa komentar.`;
 
 function buildUserPrompt(
   transcriptText: string,
@@ -27,27 +34,27 @@ function buildUserPrompt(
   minDur: number,
   maxDur: number
 ): string {
-  return `Analyze the following video transcript (total duration: ${Math.round(duration)}s) and select the TOP ${clipCount} moments most likely to go viral as YouTube Shorts.
+  return `Analisis transkrip video berikut (durasi total: ${Math.round(duration)} detik) dan pilih TOP ${clipCount} momen yang paling berpotensi viral sebagai YouTube Shorts.
 
-Requirements for each clip:
-- Duration between ${minDur} and ${maxDur} seconds
-- Must be a contiguous segment (startTime to endTime)
-- Must be self-contained and understandable on its own
-- Must have a scroll-stopping hook
-- Score each clip 0-100 based on viral potential
+Persyaratan setiap klip:
+- Durasi antara ${minDur} dan ${maxDur} detik
+- Harus segmen kontinu (startTime ke endTime)
+- Harus bisa berdiri sendiri dan dipahami tanpa konteks
+- Harus punya hook yang membuat orang berhenti scroll
+- Beri skor setiap klip 0-100 berdasarkan potensi viral
 
-For each clip provide:
-- startTime: (in seconds, number)
-- endTime: (in seconds, number)
-- title: a catchy, click-worthy YouTube Shorts title (max 70 chars, NO clickbait that misleads)
-- description: a 1-2 sentence description of what happens
-- reason: a concise explanation of why this moment will go viral
-- score: virality score 0-100 (number)
-- hook: the exact opening line/first 3 seconds to retain viewers (the actual spoken text or a punchy intro)
-- hashtags: 5-8 relevant hashtags WITHOUT the # symbol, optimized for YouTube Shorts discovery
-- transcript: the actual transcript text for this clip's time range (taken from the source)
+Untuk setiap klip sediakan:
+- startTime: (dalam detik, angka)
+- endTime: (dalam detik, angka)
+- title: judul YouTube Shorts yang menarik dan eye-catching (MAKS 70 karakter, BAHASA INDONESIA, tanpa clickbait menyesatkan)
+- description: deskripsi 1-2 kalimat tentang apa yang terjadi (BAHASA INDONESIA)
+- reason: penjelasan singkat mengapa momen ini akan viral (BAHASA INDONESIA)
+- score: skor viral 0-100 (angka)
+- hook: baris pembuka/3 detik pertama untuk mempertahankan penonton (teks yang diucapkan atau intro yang punchy, BAHASA INDONESIA)
+- hashtags: 5-8 hashtag relevan TANPA simbol #, optimized untuk YouTube Shorts
+- transcript: teks transkrip aktual untuk rentang waktu klip ini (diambil dari sumber)
 
-Return ONLY a JSON object with this exact shape:
+Kembalikan HANYA objek JSON dengan bentuk persis ini:
 {
   "clips": [
     {
@@ -64,7 +71,7 @@ Return ONLY a JSON object with this exact shape:
   ]
 }
 
-Order clips by score descending. Do not include any text outside the JSON object.
+Urutkan klip berdasarkan skor menurun. Jangan sertakan teks di luar objek JSON.
 
 TRANSCRIPT:
 ${transcriptText}`;

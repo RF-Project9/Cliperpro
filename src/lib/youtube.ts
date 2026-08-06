@@ -150,17 +150,31 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptSegmen
       const segments = await YoutubeTranscript.fetchTranscript(videoId, { lang });
       if (segments && segments.length > 0) {
         console.log(`[transcript] ✅ youtube-transcript (${lang}): ${segments.length} segments`);
-        return segments.map((s) => ({
-          text: (s.text || "")
-            .replace(/&#39;/g, "'")
-            .replace(/&amp;/g, "&")
-            .replace(/&quot;/g, '"')
-            .replace(/&lt;/g, "<")
-            .replace(/&gt;/g, ">")
-            .trim(),
-          start: Number(s.offset ?? s.start ?? 0),
-          duration: Number(s.duration ?? 0),
-        }));
+        console.log(`[transcript] raw segment sample:`, JSON.stringify(segments[0]).slice(0, 200));
+        return segments.map((s) => {
+          // youtube-transcript package returns offset in MILLISECONDS
+          // Convert to seconds for consistency with clip startTime/endTime
+          let startSec = Number(s.offset ?? s.start ?? 0);
+          // If start > 1000, it's likely in milliseconds — convert to seconds
+          if (startSec > 1000) {
+            startSec = startSec / 1000;
+          }
+          let durSec = Number(s.duration ?? 0);
+          if (durSec > 100) {
+            durSec = durSec / 1000;
+          }
+          return {
+            text: (s.text || "")
+              .replace(/&#39;/g, "'")
+              .replace(/&amp;/g, "&")
+              .replace(/&quot;/g, '"')
+              .replace(/&lt;/g, "<")
+              .replace(/&gt;/g, ">")
+              .trim(),
+            start: startSec,
+            duration: durSec,
+          };
+        });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

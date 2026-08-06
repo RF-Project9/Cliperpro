@@ -28,7 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useClipperStore, type SubtitleEntry } from "@/lib/store";
+import { useClipperStore, type SubtitleEntry, type SubtitleStyle } from "@/lib/store";
 import { getEmbedUrl, formatTimestamp } from "@/lib/youtube";
 import { toast } from "sonner";
 import { ClipItem } from "@/lib/types";

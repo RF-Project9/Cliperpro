@@ -1350,25 +1350,46 @@ export async function processClip(
   // Emoji overlay on climax clips (score >= 75)
   // Use pre-downloaded emoji PNG images as additional ffmpeg inputs
   const emojiInputs: string[] = [];
-  let filterComplex = filters.join(",");
+  const hasFireEmoji = clip.score >= 75 && existsSync(join(WORK_DIR, "emoji-fire.png"));
+  const hasWowEmoji = clip.score >= 75 && existsSync(join(WORK_DIR, "emoji-wow.png"));
+  const needsEmojiOverlay = hasFireEmoji || hasWowEmoji;
 
-  if (clip.score >= 75) {
-    const emoji1Time = clipDuration * 0.3;
-    const emoji2Time = clipDuration * 0.7;
-    const fireEmojiPath = join(WORK_DIR, "emoji-fire.png");
-    const wowEmojiPath = join(WORK_DIR, "emoji-wow.png");
+  let filterComplex: string;
 
-    if (existsSync(fireEmojiPath)) {
-      emojiInputs.push("-i", fireEmojiPath);
-      // Scale emoji to 150x150 and overlay
-      filterComplex += `;[1:v]scale=150:150[emoji1];[0:v][emoji1]overlay=(W-w)/2:H/2-h-150:enable='between(t\,${emoji1Time}\,${emoji1Time + 1})':format=auto,format=yuv420p[vid1]`;
+  if (needsEmojiOverlay) {
+    // Label the main processed chain as [processed] so emoji overlays
+    // can reference the FULLY processed video (crop+scale+subtitles+intro/outro)
+    const mainChain = filters.join(",") + ",format=yuv420p[processed]";
+    const emojiChains: string[] = [];
+
+    if (hasFireEmoji) {
+      emojiInputs.push("-i", join(WORK_DIR, "emoji-fire.png"));
+      const emoji1Time = clipDuration * 0.3;
+      emojiChains.push(`[1:v]scale=150:150[emoji1]`);
+      emojiChains.push(`[processed][emoji1]overlay=(W-w)/2:H-h-180:enable='between(t\\,${emoji1Time}\\,${emoji1Time + 1})':format=auto,format=yuv420p[with_emoji1]`);
     }
-    if (existsSync(wowEmojiPath)) {
-      emojiInputs.push("-i", wowEmojiPath);
-      const inputIdx = existsSync(fireEmojiPath) ? 2 : 1;
-      const baseLabel = existsSync(fireEmojiPath) ? "vid1" : "0:v";
-      filterComplex += `;[${inputIdx}:v]scale=150:150[emoji2];[${baseLabel}][emoji2]overlay=(W-w)/2:H/2-h-150:enable='between(t\,${emoji2Time}\,${emoji2Time + 1})':format=auto,format=yuv420p`;
+
+    if (hasWowEmoji) {
+      emojiInputs.push("-i", join(WORK_DIR, "emoji-wow.png"));
+      const inputIdx = hasFireEmoji ? 2 : 1;
+      const baseLabel = hasFireEmoji ? "with_emoji1" : "processed";
+      const emoji2Time = clipDuration * 0.7;
+      emojiChains.push(`[${inputIdx}:v]scale=150:150[emoji2]`);
+      // Last chain: NO output label → goes directly to output file
+      emojiChains.push(`[${baseLabel}][emoji2]overlay=(W-w)/2:H-h-180:enable='between(t\\,${emoji2Time}\\,${emoji2Time + 1})':format=auto,format=yuv420p`);
     }
+
+    // If only fire emoji (no wow), the last chain ends with [with_emoji1]
+    // We need to remove that label so output goes to file
+    if (hasFireEmoji && !hasWowEmoji) {
+      const lastChain = emojiChains[emojiChains.length - 1];
+      emojiChains[emojiChains.length - 1] = lastChain.replace(/\[with_emoji1\]$/, "");
+    }
+
+    filterComplex = mainChain + ";" + emojiChains.join(";");
+  } else {
+    // No emoji overlay — simple chain, no labels needed
+    filterComplex = filters.join(",") + ",format=yuv420p";
   }
 
   const ffmpegArgs = [

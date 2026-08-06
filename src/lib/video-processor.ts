@@ -830,36 +830,46 @@ export function generateASS(
 
   let entries: { start: number; end: number; text: string }[] = [];
 
-  // Check if lines have [seconds] timestamps (from YouTube transcript)
-  // Format: [12.5] text here  OR  [0:12] text here
-  const timestamped = rawLines.every((l) => /^\[\d+[:.]\d+/.test(l));
+  // Parse each line for timestamps — handle multiple formats:
+  // [12.5] text  |  [1:23] text  |  [1:23.5] text  |  [0:05] text
+  for (const line of rawLines) {
+    let time: number | null = null;
+    let text: string | null = null;
 
-  if (timestamped) {
-    for (const line of rawLines) {
-      // Match [12.5] or [1:23] or [0:05.5]
-      const match = line.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.+)$/) || line.match(/^\[(\d+(?:\.\d+)?)\]\s*(.+)$/);
-      if (match) {
-        let time: number;
-        let text: string;
-        if (match.length === 4) {
-          // [mm:ss.ss] format
-          time = parseInt(match[1]) * 60 + parseFloat(match[2]);
-          text = match[3].trim();
-        } else {
-          // [seconds.ss] format
-          time = parseFloat(match[1]);
-          text = match[2].trim();
-        }
-        // Only include lines within the clip's time range
-        if (time >= clip.startTime && time <= clip.endTime) {
-          entries.push({
-            start: time - clip.startTime,
-            end: time - clip.startTime + 3, // default 3s, will be fixed below
-            text,
-          });
-        }
+    // Try [mm:ss.ss] format first
+    const mmMatch = line.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.+)$/);
+    if (mmMatch) {
+      time = parseInt(mmMatch[1]) * 60 + parseFloat(mmMatch[2]);
+      text = mmMatch[3].trim();
+    } else {
+      // Try [ss.ss] format
+      const ssMatch = line.match(/^\[(\d+(?:\.\d+)?)\]\s*(.+)$/);
+      if (ssMatch) {
+        time = parseFloat(ssMatch[1]);
+        text = ssMatch[2].trim();
       }
     }
+
+    if (time !== null && text !== null && text.length > 0) {
+      // Only include lines within the clip's time range
+      if (time >= clip.startTime && time <= clip.endTime) {
+        entries.push({
+          start: time - clip.startTime,
+          end: time - clip.startTime + 3, // default, will be fixed
+          text,
+        });
+      }
+    }
+  }
+
+  // If no timestamped entries found, fall back to distributing text evenly
+  if (entries.length === 0) {
+    console.warn("[ass] no timestamped entries found, distributing evenly");
+    const perLine = clipDuration / rawLines.length;
+    rawLines.forEach((text, i) => {
+      entries.push({ start: i * perLine, end: (i + 1) * perLine, text });
+    });
+  } else {
     // Fix end times: each entry ends when next starts
     for (let i = 0; i < entries.length - 1; i++) {
       entries[i].end = Math.min(entries[i].end, entries[i + 1].start);
@@ -867,22 +877,13 @@ export function generateASS(
     if (entries.length > 0) {
       entries[entries.length - 1].end = clipDuration;
     }
-  } else {
-    // No timestamps — distribute evenly
-    const perLine = clipDuration / rawLines.length;
-    rawLines.forEach((text, i) => {
-      entries.push({ start: i * perLine, end: (i + 1) * perLine, text });
-    });
   }
 
   if (entries.length === 0) return "";
 
-  // Determine if this is a "climax" clip (high virality score)
-  const isClimax = clip.score >= 75;
-  const emojis = ["🔥", "💥", "⚡", "🎯", "😱", "😂", "💯", "🤯"];
-  let emojiIdx = 0;
+  console.log(`[ass] generated ${entries.length} subtitle entries`);
 
-  // Build ASS file with enhanced styling
+  // Build ASS file — use DejaVu Sans Bold (ALWAYS available on Debian/Ubuntu)
   const ass = `[Script Info]
 Title: ViralClip AI Subtitles
 ScriptType: v4.00+
@@ -894,7 +895,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Main,Montserrat,80,&H00FFFFFF,&H0000F9FF,&H00000000,&HCC000000,-1,0,0,0,100,100,2,0,1,8,4,2,80,80,400,1
+Style: Main,DejaVu Sans,76,&H00FFFFFF,&H0000F9FF,&H00000000,&HCC000000,-1,0,0,0,100,100,1,0,3,6,3,2,60,60,500,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -902,8 +903,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
   const dialogueLines: string[] = [];
 
-  for (let entryIdx = 0; entryIdx < entries.length; entryIdx++) {
-    const entry = entries[entryIdx];
+  for (const entry of entries) {
     const words = entry.text.split(/\s+/).filter(Boolean);
     if (words.length === 0) continue;
 
@@ -929,14 +929,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         })
         .join(" ");
 
-      // Add fade in/out + emoji on climax clips (every 3rd entry)
-      let styledLine = `{\\fad(80,60)}${karaokeText}`;
-
-      if (isClimax && entryIdx % 3 === 0 && pIdx === 0) {
-        const emoji = emojis[emojiIdx % emojis.length];
-        emojiIdx++;
-        styledLine = `{\\fad(80,60)}${emoji} ${karaokeText}`;
-      }
+      // Add fade in/out
+      const styledLine = `{\\fad(80,60)}${karaokeText}`;
 
       dialogueLines.push(
         `Dialogue: 0,${formatASSTime(phraseStart)},${formatASSTime(
@@ -946,7 +940,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     });
   }
 
-  return ass + dialogueLines.join("\n") + "\n";
+  const fullAss = ass + dialogueLines.join("\n") + "\n";
+  console.log(`[ass] ASS file size: ${fullAss.length} chars, ${dialogueLines.length} dialogue lines`);
+  return fullAss;
 }
 
 /**
@@ -1219,10 +1215,11 @@ export async function processClip(
   //   2. scale to 1080x1920 (9:16 vertical output for YouTube Shorts)
   //   3. eq: color enhancement (saturation/contrast/brightness)
   //   4. drawbox: progress bar at top (viral style)
-  //   5. drawtext: watermark "ViralClip AI" (with explicit fontfile)
-  //   6. drawtext: intro card (clip title, first 2 seconds)
-  //   7. drawtext: outro card (CTA, last 2 seconds)
-  //   8. burn ASS subtitles (word-by-word karaoke style with fade + emoji)
+  //   5. drawtext: watermark "ViralClip AI" (persistent, bottom-right)
+  //   6. drawbox + drawtext: intro card (first 2.5s, with branding)
+  //   7. drawbox + drawtext: outro card (last 2s, CTA)
+  //   8. drawtext: emoji overlay on climax moments (if score >= 75)
+  //   9. burn ASS subtitles (word-by-word karaoke style)
   const filters: string[] = [
     `crop=${cropWidth}:${cropHeight}:${cropX}:${cropY}`,
     `scale=1080:1920:force_original_aspect_ratio=decrease`,
@@ -1237,24 +1234,53 @@ export async function processClip(
     `drawbox=x=0:y=0:w='iw*t/${clipDuration}':h=6:color=0x6D28D9@0.9:t=fill`
   );
 
-  // Watermark "ViralClip AI" — use DejaVu font (always available on Debian/Ubuntu)
-  const fontFile = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
-  const escapedTitle = clip.title.replace(/'/g, "\\'").replace(/:/g, "\\:");
+  // Font files (always available after apt install fonts-dejavu fonts-noto)
+  const fontBold = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+  const fontRegular = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+
+  // Watermark "ViralClip AI" — persistent, bottom-right
   filters.push(
-    `drawtext=fontfile=${fontFile}:text='ViralClip AI':fontcolor=white@0.6:fontsize=24:x=w-tw-20:y=h-th-20:box=1:boxcolor=black@0.5:boxborderw=6`
+    `drawtext=fontfile=${fontBold}:text='ViralClip AI':fontcolor=white@0.7:fontsize=24:x=w-tw-20:y=h-th-20:box=1:boxcolor=black@0.5:boxborderw=6`
   );
 
-  // Intro card: show clip title for first 2.5 seconds
-  // Positioned at center, fades out
+  // Intro card: first 2.5 seconds
+  // Background box + title text + "VIRAL CLIP" branding
+  const escapedTitle = clip.title.replace(/'/g, "\\'").replace(/:/g, "\\:").slice(0, 40);
   filters.push(
-    `drawtext=fontfile=${fontFile}:text='${escapedTitle}':fontcolor=white:fontsize=42:x=(w-tw)/2:y=300:box=1:boxcolor=black@0.7:boxborderw=20:enable='lt(t,2.5)'`
+    // Background box (purple gradient feel)
+    `drawbox=x=80:y=350:w=920:h=200:color=0x6D28D9@0.85:t=fill:enable='lt(t,2.5)'`,
+    `drawbox=x=80:y=350:w=920:h=200:color=white@0.3:t=fill:enable='lt(t,2.5)'`,
+    // Title text
+    `drawtext=fontfile=${fontBold}:text='${escapedTitle}':fontcolor=white:fontsize=36:x=(w-tw)/2:y=400:enable='lt(t,2.5)'`,
+    // "VIRAL CLIP" branding
+    `drawtext=fontfile=${fontBold}:text='VIRAL CLIP':fontcolor=0xFFD700:fontsize=28:x=(w-tw)/2:y=480:enable='lt(t,2.5)'`
   );
 
-  // Outro card: "Follow for more!" for last 2 seconds
-  const outroStart = clipDuration - 2;
+  // Outro card: last 2.5 seconds
+  const outroStart = Math.max(0, clipDuration - 2.5);
+  const topHashtag = clip.hashtags && clip.hashtags.length > 0 ? clip.hashtags[0] : "shorts";
   filters.push(
-    `drawtext=fontfile=${fontFile}:text='Follow for more!':fontcolor=white:fontsize=48:x=(w-tw)/2:y=900:box=1:boxcolor=0x6D28D9@0.8:boxborderw=20:enable='gt(t,${outroStart})'`
+    // Background box
+    `drawbox=x=80:y=750:w=920:h=300:color=black@0.8:t=fill:enable='gt(t,${outroStart})'`,
+    `drawbox=x=80:y=750:w=920:h=300:color=0x6D28D9@0.5:t=fill:enable='gt(t,${outroStart})'`,
+    // "Follow for more!" text
+    `drawtext=fontfile=${fontBold}:text='Follow for more!':fontcolor=white:fontsize=44:x=(w-tw)/2:y=820:enable='gt(t,${outroStart})'`,
+    // Hashtag
+    `drawtext=fontfile=${fontRegular}:text='#${topHashtag}':fontcolor=0xFFD700:fontsize=32:x=(w-tw)/2:y=900:enable='gt(t,${outroStart})'`
   );
+
+  // Emoji overlay on climax clips (score >= 75)
+  // Show emoji at 30% and 70% of clip duration for 1 second each
+  if (clip.score >= 75) {
+    const emoji1Time = clipDuration * 0.3;
+    const emoji2Time = clipDuration * 0.7;
+    // Use Noto Color Emoji font if available, else skip emoji
+    const emojiFont = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf";
+    filters.push(
+      `drawtext=fontfile=${fontBold}:text='FIRE':fontcolor=0xFF4500:fontsize=120:x=(w-tw)/2:y=200:enable='between(t,${emoji1Time},${emoji1Time + 1})':alpha='if(lt(t,${emoji1Time + 0.5}),1,1-(t-${emoji1Time + 0.5})/0.5)'`,
+      `drawtext=fontfile=${fontBold}:text='WOW':fontcolor=0xFFD700:fontsize=120:x=(w-tw)/2:y=200:enable='between(t,${emoji2Time},${emoji2Time + 1})':alpha='if(lt(t,${emoji2Time + 0.5}),1,1-(t-${emoji2Time + 0.5})/0.5)'`
+    );
+  }
 
   if (assContent) {
     // ASS subtitles support karaoke (\k tags) for word-by-word highlighting

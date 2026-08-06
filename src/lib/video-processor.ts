@@ -858,8 +858,8 @@ export function generateASS(
     }
 
     if (time !== null && text !== null && text.length > 0) {
-      // Only include lines within the clip's time range (with 5s buffer)
-      if (time >= clip.startTime - 5 && time <= clip.endTime + 5) {
+      // Only include lines within the clip's time range (with 1s buffer)
+      if (time >= clip.startTime - 1 && time <= clip.endTime + 1) {
         entries.push({
           start: Math.max(0, time - clip.startTime),
           end: Math.max(0, time - clip.startTime) + 3,
@@ -875,14 +875,12 @@ export function generateASS(
   if (entries.length === 0) {
     console.warn("[ass] no timestamped entries found, using fallback: distribute all text evenly");
     // Use all raw lines (even without timestamps) and distribute evenly
-    const cleanLines = rawLines.filter((l) => !l.startsWith("[") || l.includes(" "));
+    const cleanLines = rawLines.map((l) => l.replace(/^\[[\d:.]+\]\s*/, "").trim()).filter((t) => t.length > 0);
     const linesToUse = cleanLines.length > 0 ? cleanLines : rawLines;
     const perLine = clipDuration / linesToUse.length;
     linesToUse.forEach((text, i) => {
-      // Remove timestamp prefix if present
-      const cleanText = text.replace(/^\[[\d:.]+\]\s*/, "").trim();
-      if (cleanText.length > 0) {
-        entries.push({ start: i * perLine, end: (i + 1) * perLine, text: cleanText });
+      if (text.length > 0) {
+        entries.push({ start: i * perLine, end: (i + 1) * perLine, text });
       }
     });
   } else {
@@ -914,7 +912,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Main,DejaVu Sans,76,&H00FFFFFF,&H0000F9FF,&H00000000,&HCC000000,-1,0,0,0,100,100,1,0,3,6,3,2,60,60,500,1
+Style: Main,DejaVu Sans,76,&H00FFFFFF,&H0000F9FF,&H00000000,&H40000000,-1,0,0,0,100,100,1,0,3,8,4,2,60,60,500,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

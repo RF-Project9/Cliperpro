@@ -55,11 +55,13 @@ export function getEmbedUrl(videoId: string, start?: number, end?: number): stri
 export function formatTimestamp(seconds: number): string {
   const hrs = Math.floor(seconds / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
+  const secs = seconds % 60;
+  // Preserve 1 decimal place for subtitle sync precision
+  const secsStr = Number.isInteger(secs) ? String(secs).padStart(2, "0") : secs.toFixed(1).padStart(4, "0");
   if (hrs > 0) {
-    return `${hrs}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    return `${hrs}:${String(mins).padStart(2, "0")}:${secsStr}`;
   }
-  return `${mins}:${String(secs).padStart(2, "0")}`;
+  return `${mins}:${secsStr}`;
 }
 
 export function formatDuration(seconds: number): string {
@@ -137,8 +139,10 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptSegmen
   }
 
   // 2. Try youtube-transcript package with multiple languages
-  //    (Indonesian first since the app targets ID users, then English variants)
-  const languages = ["id", "en", "en-US", "en-GB"];
+  //    Note: English first is safer — Indonesian auto-captions on YouTube are
+  //    often inaccurate. English captions (including auto-generated) are
+  //    typically much more reliable, even for Indonesian videos.
+  const languages = ["en", "en-US", "en-GB", "id"];
   for (const lang of languages) {
     try {
       const { YoutubeTranscript } = await import("youtube-transcript");

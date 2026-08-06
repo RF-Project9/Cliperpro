@@ -470,24 +470,51 @@ async function downloadWithYtdlCore(
 
   console.log(`[video][ytdl-core] fetching info for ${youtubeId}...`);
 
-  const info = await ytdl.getInfo(url);
+  // Create a custom agent with proper headers to avoid 403
+  // YouTube blocks requests without proper User-Agent and Accept headers
+  const agent = ytdl.createAgent(
+    [
+      {
+        name: "User-Agent",
+        value:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      },
+      {
+        name: "Accept",
+        value: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      {
+        name: "Accept-Language",
+        value: "en-US,en;q=0.9",
+      },
+      {
+        name: "Accept-Encoding",
+        value: "gzip, deflate, br",
+      },
+      {
+        name: "DNT",
+        value: "1",
+      },
+      {
+        name: "Upgrade-Insecure-Requests",
+        value: "1",
+      },
+    ]
+  );
+
+  const info = await ytdl.getInfo(url, { agent });
   console.log(
     `[video][ytdl-core] got info, title: "${info.videoDetails.title}"`
   );
 
   // Pick best video+audio format ≤720p
-  // ytdl.chooseFormat handles this automatically with quality 'highest'
-  // but we filter to ≤720p first
   const format = ytdl.chooseFormat(info.formats, {
     quality: "highest",
     filter: (f) => {
-      // Video+audio combined, or we'll merge separately
       const hasVideo = f.hasVideo;
       const hasAudio = f.hasAudio;
       const height = f.height || 0;
-      // Prefer combined video+audio ≤720p
       if (hasVideo && hasAudio && height <= 720) return true;
-      // Or video-only ≤720p (we'll merge with audio)
       if (hasVideo && !hasAudio && height <= 720) return true;
       return false;
     },
@@ -505,7 +532,7 @@ async function downloadWithYtdlCore(
   if (format.hasVideo && format.hasAudio) {
     // Single stream — download directly
     console.log(`[video][ytdl-core] downloading combined stream...`);
-    const videoStream = ytdl(url, { format });
+    const videoStream = ytdl(url, { format, agent });
     const writer = createWriteStream(outputPath);
 
     return new Promise((resolve, reject) => {
@@ -525,7 +552,6 @@ async function downloadWithYtdlCore(
   // Video-only stream — need to download audio separately and merge
   console.log(`[video][ytdl-core] video-only format, downloading audio too...`);
 
-  // Pick best audio
   const audioFormat = ytdl.chooseFormat(info.formats, {
     quality: "highestaudio",
     filter: "audioonly",
@@ -541,7 +567,7 @@ async function downloadWithYtdlCore(
   // Download video
   console.log(`[video][ytdl-core] downloading video stream...`);
   await new Promise<void>((resolve, reject) => {
-    ytdl(url, { format })
+    ytdl(url, { format, agent })
       .pipe(createWriteStream(tempVideo))
       .on("finish", resolve)
       .on("error", reject);
@@ -550,7 +576,7 @@ async function downloadWithYtdlCore(
   // Download audio
   console.log(`[video][ytdl-core] downloading audio stream...`);
   await new Promise<void>((resolve, reject) => {
-    ytdl(url, { format: audioFormat })
+    ytdl(url, { format: audioFormat, agent })
       .pipe(createWriteStream(tempAudio))
       .on("finish", resolve)
       .on("error", reject);

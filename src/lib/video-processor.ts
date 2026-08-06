@@ -824,32 +824,43 @@ export function generateASS(
 ): string {
   if (!clip.transcript) return "";
 
-  const lines = clip.transcript
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
+  // The video transcript is stored as: [seconds] text\n[seconds] text\n...
+  // Parse these to get REAL timestamps from YouTube
+  const rawLines = clip.transcript.split("\n").map((l) => l.trim()).filter(Boolean);
 
-  if (lines.length === 0) return "";
-
-  // Parse timestamped lines or distribute evenly
   let entries: { start: number; end: number; text: string }[] = [];
 
-  const timestamped = lines.every((l) => /^\[\d+:\d+\]/.test(l));
+  // Check if lines have [seconds] timestamps (from YouTube transcript)
+  // Format: [12.5] text here  OR  [0:12] text here
+  const timestamped = rawLines.every((l) => /^\[\d+[:.]\d+/.test(l));
+
   if (timestamped) {
-    for (const line of lines) {
-      const match = line.match(/^\[(\d+):(\d+)\]\s*(.+)$/);
+    for (const line of rawLines) {
+      // Match [12.5] or [1:23] or [0:05.5]
+      const match = line.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.+)$/) || line.match(/^\[(\d+(?:\.\d+)?)\]\s*(.+)$/);
       if (match) {
-        const [, mm, ss, text] = match;
-        const time = parseInt(mm) * 60 + parseInt(ss);
+        let time: number;
+        let text: string;
+        if (match.length === 4) {
+          // [mm:ss.ss] format
+          time = parseInt(match[1]) * 60 + parseFloat(match[2]);
+          text = match[3].trim();
+        } else {
+          // [seconds.ss] format
+          time = parseFloat(match[1]);
+          text = match[2].trim();
+        }
+        // Only include lines within the clip's time range
         if (time >= clip.startTime && time <= clip.endTime) {
           entries.push({
             start: time - clip.startTime,
-            end: time - clip.startTime + 3,
-            text: text.trim(),
+            end: time - clip.startTime + 3, // default 3s, will be fixed below
+            text,
           });
         }
       }
     }
+    // Fix end times: each entry ends when next starts
     for (let i = 0; i < entries.length - 1; i++) {
       entries[i].end = Math.min(entries[i].end, entries[i + 1].start);
     }
@@ -857,15 +868,21 @@ export function generateASS(
       entries[entries.length - 1].end = clipDuration;
     }
   } else {
-    const perLine = clipDuration / lines.length;
-    lines.forEach((text, i) => {
+    // No timestamps — distribute evenly
+    const perLine = clipDuration / rawLines.length;
+    rawLines.forEach((text, i) => {
       entries.push({ start: i * perLine, end: (i + 1) * perLine, text });
     });
   }
 
   if (entries.length === 0) return "";
 
-  // Build ASS file with enhanced styling for Shorts
+  // Determine if this is a "climax" clip (high virality score)
+  const isClimax = clip.score >= 75;
+  const emojis = ["🔥", "💥", "⚡", "🎯", "😱", "😂", "💯", "🤯"];
+  let emojiIdx = 0;
+
+  // Build ASS file with enhanced styling
   const ass = `[Script Info]
 Title: ViralClip AI Subtitles
 ScriptType: v4.00+
@@ -885,11 +902,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
   const dialogueLines: string[] = [];
 
-  for (const entry of entries) {
+  for (let entryIdx = 0; entryIdx < entries.length; entryIdx++) {
+    const entry = entries[entryIdx];
     const words = entry.text.split(/\s+/).filter(Boolean);
     if (words.length === 0) continue;
 
-    // Break into phrases of 2-4 words for Shorts-style display
+    // Break into phrases of 2-4 words
     const phraseSize = Math.min(4, Math.max(2, Math.ceil(words.length / 3)));
     const phrases: string[][] = [];
     for (let i = 0; i < words.length; i += phraseSize) {
@@ -903,10 +921,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       const phraseEnd = phraseStart + phraseDuration;
       const wordDur = phraseDuration / phrase.length;
 
-      // Build karaoke text with animation effects:
-      // \fad = fade in/out (smooth)
-      // \k = karaoke timing (word highlights as spoken)
-      // \c = color override for current word (yellow highlight)
+      // Build karaoke text — each word gets \k timing (centiseconds)
       const karaokeText = phrase
         .map((word) => {
           const cs = Math.max(5, Math.round(wordDur * 10));
@@ -914,8 +929,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         })
         .join(" ");
 
-      // Add fade in/out + transform animation
-      const styledLine = `{\\fad(100,80)}${karaokeText}`;
+      // Add fade in/out + emoji on climax clips (every 3rd entry)
+      let styledLine = `{\\fad(80,60)}${karaokeText}`;
+
+      if (isClimax && entryIdx % 3 === 0 && pIdx === 0) {
+        const emoji = emojis[emojiIdx % emojis.length];
+        emojiIdx++;
+        styledLine = `{\\fad(80,60)}${emoji} ${karaokeText}`;
+      }
 
       dialogueLines.push(
         `Dialogue: 0,${formatASSTime(phraseStart)},${formatASSTime(
@@ -1196,34 +1217,47 @@ export async function processClip(
   // Build ffmpeg filter chain with enhanced editing effects:
   //   1. crop to detected/centered region (9:16 aspect, face-biased)
   //   2. scale to 1080x1920 (9:16 vertical output for YouTube Shorts)
-  //   3. drawbox: progress bar at top (viral style)
-  //   4. drawtext: watermark "ViralClip AI" at bottom-right
-  //   5. burn ASS subtitles (word-by-word karaoke style with fade)
+  //   3. eq: color enhancement (saturation/contrast/brightness)
+  //   4. drawbox: progress bar at top (viral style)
+  //   5. drawtext: watermark "ViralClip AI" (with explicit fontfile)
+  //   6. drawtext: intro card (clip title, first 2 seconds)
+  //   7. drawtext: outro card (CTA, last 2 seconds)
+  //   8. burn ASS subtitles (word-by-word karaoke style with fade + emoji)
   const filters: string[] = [
     `crop=${cropWidth}:${cropHeight}:${cropX}:${cropY}`,
     `scale=1080:1920:force_original_aspect_ratio=decrease`,
     `pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black`,
-    // Slight saturation/contrast boost for vibrant look
+    // Color enhancement
     `eq=saturation=1.1:contrast=1.05:brightness=0.02`,
   ];
 
-  // Add progress bar at top (animated based on time)
-  // Bar grows from left to right as clip progresses
-  const totalFrames = Math.round(clipDuration * 30); // 30fps
+  // Progress bar at top (viral style) — grows with time
   filters.push(
-    `drawbox=x=0:y=0:w=1080:h=8:color=black@0.5:t=fill`,
-    `drawbox=x=0:y=0:w='iw*t/${clipDuration}':h=8:color=0x6D28D9@0.9:t=fill`
+    `drawbox=x=0:y=0:w=1080:h=6:color=black@0.5:t=fill`,
+    `drawbox=x=0:y=0:w='iw*t/${clipDuration}':h=6:color=0x6D28D9@0.9:t=fill`
   );
 
-  // Add watermark "ViralClip AI" at bottom-right
-  // Using drawtext (requires fontconfig, available in Debian)
+  // Watermark "ViralClip AI" — use DejaVu font (always available on Debian/Ubuntu)
+  const fontFile = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+  const escapedTitle = clip.title.replace(/'/g, "\\'").replace(/:/g, "\\:");
   filters.push(
-    `drawtext=text='ViralClip AI':fontcolor=white@0.7:fontsize=28:x=w-tw-30:y=h-th-30:box=1:boxcolor=black@0.4:boxborderw=8`
+    `drawtext=fontfile=${fontFile}:text='ViralClip AI':fontcolor=white@0.6:fontsize=24:x=w-tw-20:y=h-th-20:box=1:boxcolor=black@0.5:boxborderw=6`
+  );
+
+  // Intro card: show clip title for first 2.5 seconds
+  // Positioned at center, fades out
+  filters.push(
+    `drawtext=fontfile=${fontFile}:text='${escapedTitle}':fontcolor=white:fontsize=42:x=(w-tw)/2:y=300:box=1:boxcolor=black@0.7:boxborderw=20:enable='lt(t,2.5)'`
+  );
+
+  // Outro card: "Follow for more!" for last 2 seconds
+  const outroStart = clipDuration - 2;
+  filters.push(
+    `drawtext=fontfile=${fontFile}:text='Follow for more!':fontcolor=white:fontsize=48:x=(w-tw)/2:y=900:box=1:boxcolor=0x6D28D9@0.8:boxborderw=20:enable='gt(t,${outroStart})'`
   );
 
   if (assContent) {
     // ASS subtitles support karaoke (\k tags) for word-by-word highlighting
-    // ffmpeg renders ASS natively with full styling support
     const escapedAss = assPath.replace(/:/g, "\\:");
     filters.push(`subtitles='${escapedAss}'`);
   }
@@ -1351,6 +1385,9 @@ export async function renderClip(clipId: string): Promise<{
     const { path: videoPath } = await downloadVideo(clip.video.youtubeId);
 
     // 3. Build the ClipItem shape needed by processClip
+    //    IMPORTANT: Use the VIDEO's timestamped transcript (from YouTube),
+    //    NOT the clip's transcript (from OpenAI, may not have timestamps).
+    //    The video.transcript field has [seconds] text format with real timestamps.
     const clipItem: ClipItem = {
       id: clip.id,
       videoId: clip.videoId,
@@ -1363,13 +1400,13 @@ export async function renderClip(clipId: string): Promise<{
       score: clip.score,
       hook: clip.hook,
       hashtags: clip.hashtags ? JSON.parse(clip.hashtags) : null,
-      transcript: clip.transcript,
+      transcript: clip.video.transcript || clip.transcript, // ← Use video's real timestamped transcript
       status: "downloading",
       downloadUrl: clip.downloadUrl,
       createdAt: clip.createdAt.toISOString(),
     };
 
-    // 4. Process: cut + crop 16:9 + face tracking + burn subtitles
+    // 4. Process: cut + crop 9:16 + face tracking + burn subtitles + effects
     const outputPath = await processClip(videoPath, clipItem);
 
     // 5. Verify file exists

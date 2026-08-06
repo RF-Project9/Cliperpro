@@ -1320,12 +1320,12 @@ export async function processClip(
   const escapedTitle = clip.title.replace(/'/g, "\\'").replace(/:/g, "\\:").slice(0, 40);
   filters.push(
     // Background box (purple gradient feel)
-    `drawbox=x=80:y=350:w=920:h=200:color=0x6D28D9@0.85:t=fill:enable='lt(t,2.5)'`,
-    `drawbox=x=80:y=350:w=920:h=200:color=white@0.3:t=fill:enable='lt(t,2.5)'`,
+    `drawbox=x=80:y=350:w=920:h=200:color=0x6D28D9@0.85:t=fill:enable='lt(t\,2.5)'`,
+    `drawbox=x=80:y=350:w=920:h=200:color=white@0.3:t=fill:enable='lt(t\,2.5)'`,
     // Title text
-    `drawtext=fontfile=${fontBold}:text='${escapedTitle}':fontcolor=white:fontsize=36:x=(w-tw)/2:y=400:enable='lt(t,2.5)'`,
+    `drawtext=fontfile=${fontBold}:text='${escapedTitle}':fontcolor=white:fontsize=36:x=(w-tw)/2:y=400:enable='lt(t\,2.5)'`,
     // "KLIP VIRAL" branding
-    `drawtext=fontfile=${fontBold}:text='KLIP VIRAL':fontcolor=0xFFD700:fontsize=28:x=(w-tw)/2:y=480:enable='lt(t,2.5)'`
+    `drawtext=fontfile=${fontBold}:text='KLIP VIRAL':fontcolor=0xFFD700:fontsize=28:x=(w-tw)/2:y=480:enable='lt(t\,2.5)'`
   );
 
   // Outro card: last 2.5 seconds
@@ -1333,12 +1333,12 @@ export async function processClip(
   const topHashtag = clip.hashtags && clip.hashtags.length > 0 ? clip.hashtags[0] : "shorts";
   filters.push(
     // Background box
-    `drawbox=x=80:y=750:w=920:h=300:color=black@0.8:t=fill:enable='gt(t,${outroStart})'`,
-    `drawbox=x=80:y=750:w=920:h=300:color=0x6D28D9@0.5:t=fill:enable='gt(t,${outroStart})'`,
+    `drawbox=x=80:y=750:w=920:h=300:color=black@0.8:t=fill:enable='gt(t\,${outroStart})'`,
+    `drawbox=x=80:y=750:w=920:h=300:color=0x6D28D9@0.5:t=fill:enable='gt(t\,${outroStart})'`,
     // "Follow untuk lebih banyak!" text
-    `drawtext=fontfile=${fontBold}:text='Follow untuk lebih banyak!':fontcolor=white:fontsize=44:x=(w-tw)/2:y=820:enable='gt(t,${outroStart})'`,
+    `drawtext=fontfile=${fontBold}:text='Follow untuk lebih banyak!':fontcolor=white:fontsize=44:x=(w-tw)/2:y=820:enable='gt(t\,${outroStart})'`,
     // Hashtag
-    `drawtext=fontfile=${fontRegular}:text='#${topHashtag}':fontcolor=0xFFD700:fontsize=32:x=(w-tw)/2:y=900:enable='gt(t,${outroStart})'`
+    `drawtext=fontfile=${fontRegular}:text='#${topHashtag}':fontcolor=0xFFD700:fontsize=32:x=(w-tw)/2:y=900:enable='gt(t\,${outroStart})'`
   );
 
   if (assContent) {
@@ -1361,13 +1361,13 @@ export async function processClip(
     if (existsSync(fireEmojiPath)) {
       emojiInputs.push("-i", fireEmojiPath);
       // Scale emoji to 150x150 and overlay
-      filterComplex += `;[1:v]scale=150:150[emoji1];[0:v][emoji1]overlay=(W-w)/2:H/2-h-150:enable='between(t,${emoji1Time},${emoji1Time + 1})':format=auto,format=yuv420p[vid1]`;
+      filterComplex += `;[1:v]scale=150:150[emoji1];[0:v][emoji1]overlay=(W-w)/2:H/2-h-150:enable='between(t\,${emoji1Time}\,${emoji1Time + 1})':format=auto,format=yuv420p[vid1]`;
     }
     if (existsSync(wowEmojiPath)) {
       emojiInputs.push("-i", wowEmojiPath);
       const inputIdx = existsSync(fireEmojiPath) ? 2 : 1;
       const baseLabel = existsSync(fireEmojiPath) ? "vid1" : "0:v";
-      filterComplex += `;[${inputIdx}:v]scale=150:150[emoji2];[${baseLabel}][emoji2]overlay=(W-w)/2:H/2-h-150:enable='between(t,${emoji2Time},${emoji2Time + 1})':format=auto,format=yuv420p`;
+      filterComplex += `;[${inputIdx}:v]scale=150:150[emoji2];[${baseLabel}][emoji2]overlay=(W-w)/2:H/2-h-150:enable='between(t\,${emoji2Time}\,${emoji2Time + 1})':format=auto,format=yuv420p`;
     }
   }
 

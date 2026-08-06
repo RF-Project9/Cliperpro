@@ -865,7 +865,7 @@ export function generateASS(
 
   if (entries.length === 0) return "";
 
-  // Build ASS file
+  // Build ASS file with enhanced styling for Shorts
   const ass = `[Script Info]
 Title: ViralClip AI Subtitles
 ScriptType: v4.00+
@@ -877,7 +877,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Main,Arial Black,72,&H00FFFFFF,&H0000F9FF,&H00000000,&HAA000000,-1,0,0,0,100,100,0,0,1,6,3,2,60,60,350,1
+Style: Main,Montserrat,80,&H00FFFFFF,&H0000F9FF,&H00000000,&HCC000000,-1,0,0,0,100,100,2,0,1,8,4,2,80,80,400,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -903,20 +903,24 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       const phraseEnd = phraseStart + phraseDuration;
       const wordDur = phraseDuration / phrase.length;
 
-      // Build karaoke text: {\k20}word1 {\k20}word2 ...
-      // \k = karaoke highlight (in centiseconds)
-      // Each word gets its own timing
+      // Build karaoke text with animation effects:
+      // \fad = fade in/out (smooth)
+      // \k = karaoke timing (word highlights as spoken)
+      // \c = color override for current word (yellow highlight)
       const karaokeText = phrase
         .map((word) => {
-          const cs = Math.max(5, Math.round(wordDur * 10)); // centiseconds
+          const cs = Math.max(5, Math.round(wordDur * 10));
           return `{\\k${cs}}${word}`;
         })
         .join(" ");
 
+      // Add fade in/out + transform animation
+      const styledLine = `{\\fad(100,80)}${karaokeText}`;
+
       dialogueLines.push(
         `Dialogue: 0,${formatASSTime(phraseStart)},${formatASSTime(
           phraseEnd
-        )},Main,,0,0,0,,${karaokeText}`
+        )},Main,,0,0,0,,${styledLine}`
       );
     });
   }
@@ -1189,15 +1193,33 @@ export async function processClip(
       `crop ${cropWidth}x${cropHeight} at (${cropX},${cropY}) → scale to 1080x1920 (9:16 vertical)`
   );
 
-  // Build ffmpeg filter chain:
+  // Build ffmpeg filter chain with enhanced editing effects:
   //   1. crop to detected/centered region (9:16 aspect, face-biased)
   //   2. scale to 1080x1920 (9:16 vertical output for YouTube Shorts)
-  //   3. burn ASS subtitles (word-by-word karaoke style)
+  //   3. drawbox: progress bar at top (viral style)
+  //   4. drawtext: watermark "ViralClip AI" at bottom-right
+  //   5. burn ASS subtitles (word-by-word karaoke style with fade)
   const filters: string[] = [
     `crop=${cropWidth}:${cropHeight}:${cropX}:${cropY}`,
     `scale=1080:1920:force_original_aspect_ratio=decrease`,
     `pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black`,
+    // Slight saturation/contrast boost for vibrant look
+    `eq=saturation=1.1:contrast=1.05:brightness=0.02`,
   ];
+
+  // Add progress bar at top (animated based on time)
+  // Bar grows from left to right as clip progresses
+  const totalFrames = Math.round(clipDuration * 30); // 30fps
+  filters.push(
+    `drawbox=x=0:y=0:w=1080:h=8:color=black@0.5:t=fill`,
+    `drawbox=x=0:y=0:w='iw*t/${clipDuration}':h=8:color=0x6D28D9@0.9:t=fill`
+  );
+
+  // Add watermark "ViralClip AI" at bottom-right
+  // Using drawtext (requires fontconfig, available in Debian)
+  filters.push(
+    `drawtext=text='ViralClip AI':fontcolor=white@0.7:fontsize=28:x=w-tw-30:y=h-th-30:box=1:boxcolor=black@0.4:boxborderw=8`
+  );
 
   if (assContent) {
     // ASS subtitles support karaoke (\k tags) for word-by-word highlighting

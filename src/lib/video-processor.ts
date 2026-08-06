@@ -1197,9 +1197,6 @@ export async function processClip(
     `crop=${cropWidth}:${cropHeight}:${cropX}:${cropY}`,
     `scale=1080:1920:force_original_aspect_ratio=decrease`,
     `pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black`,
-    // Slight scale up for "punch in" effect (makes video feel closer/dynamic)
-    `scale=1188:2112:flags=lanczos`,
-    `crop=1080:1920:54:108`,
   ];
 
   if (assContent) {
@@ -1249,11 +1246,15 @@ export async function processClip(
       maxBuffer: 10 * 1024 * 1024,
     });
     console.log(`[video] ffmpeg stderr (last 800):`, stderr.slice(-800));
-  } catch (err) {
+  } catch (err: any) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[video] ffmpeg FAILED:`, message.slice(0, 1000));
+    // Capture FULL stderr from ffmpeg — it's in err.stderr, not err.message
+    const fullStderr = err?.stderr || "";
+    console.error(`[video] ffmpeg FAILED:`, message.slice(0, 500));
+    console.error(`[video] ffmpeg FULL STDERR:`, fullStderr.slice(-1500));
     throw new Error(
-      `ffmpeg failed to process clip. Details: ${message.slice(0, 500)}`
+      `ffmpeg failed to process clip. Details: ${message.slice(0, 300)}. ` +
+        `FFMPEG STDERR: ${fullStderr.slice(-800)}`
     );
   }
 
